@@ -20,8 +20,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   // Auth
+  requestMagicLink: (email: string) =>
+    req<{ ok: boolean }>('/auth/request-link', { method: 'POST', body: JSON.stringify({ email }) }),
   exchangeMagicToken: (magicToken: string) =>
-    req<{ token: string }>('/auth/token', { method: 'POST', body: JSON.stringify({ magicToken }) }),
+    req<{ token: string }>('/auth/token', { method: 'POST', body: JSON.stringify({ token: magicToken }) }),
 
   // Tenant
   getMe: () => req<Tenant>('/tenants/me'),

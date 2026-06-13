@@ -52,6 +52,93 @@ export interface AgentDoc {
 
 // ── Tenant provisioning ──────────────────────────────────────────────────────
 
+// ── WooCommerce subscription check ──────────────────────────────────────────
+
+export interface WcSubscriptionResult {
+  hasAccess: boolean;
+  wcUserId?: number;
+  wcUserName?: string;
+  plan?: string;
+}
+
+export async function checkWcSubscription(email: string): Promise<WcSubscriptionResult> {
+  const { url, consumerKey, consumerSecret, subscriptionProductId } = config.woocommerce;
+  if (!url || !consumerKey || !consumerSecret) {
+    console.warn('[provisioning] WooCommerce credentials not configured — granting access');
+    return { hasAccess: true };
+  }
+
+  const base64 = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
+  const headers = { Authorization: `Basic ${base64}`, 'Content-Type': 'application/json' };
+
+  try {
+    // Fetch active subscriptions for this email
+    const params = new URLSearchParams({ email, status: 'active', per_page: '50' });
+    const r = await fetch(`${url.replace(/\/$/, '')}/wp-json/wc/v1/subscriptions?${params}`, { headers });
+
+    if (!r.ok) {
+      console.error(`[provisioning] WC subscriptions check failed: ${r.status}`);
+      return { hasAccess: false };
+    }
+
+    type WcSubscription = {
+      id: number;
+      customer_id: number;
+      line_items: { product_id: number }[];
+      billing: { first_name?: string; last_name?: string };
+    };
+
+    const subs = await r.json() as WcSubscription[];
+    const match = subs.find(s =>
+      s.line_items.some(li => li.product_id === subscriptionProductId)
+    );
+
+    if (!match) return { hasAccess: false };
+
+    const wcUserName = [match.billing.first_name, match.billing.last_name].filter(Boolean).join(' ') || email;
+    return { hasAccess: true, wcUserId: match.customer_id, wcUserName };
+  } catch (e) {
+    console.error('[provisioning] WC subscription check error:', String(e));
+    return { hasAccess: false };
+  }
+}
+
+// ── Find or create tenant (idempotent) ──────────────────────────────────────
+
+export async function findOrCreateTenant(
+  email: string,
+  wcInfo?: { wcUserId?: number; wcUserName?: string },
+): Promise<{ tenant: TenantDoc; isNew: boolean }> {
+  const db = await getDb();
+  const existing = await db.collection<TenantDoc>('tenants').findOne({ email });
+  if (existing) return { tenant: existing, isNew: false };
+
+  const tenantId = generateId();
+  const name = wcInfo?.wcUserName ?? email.split('@')[0];
+
+  const tenant: TenantDoc = {
+    _id: tenantId,
+    email,
+    name,
+    woocommerceUserId: wcInfo?.wcUserId ? String(wcInfo.wcUserId) : undefined,
+    plan: 'starter',
+    status: 'active',
+    createdAt: new Date(),
+  };
+
+  await db.collection<TenantDoc>('tenants').insertOne(tenant);
+  console.log(`[provisioning] Tenant created: ${tenantId} email=${email}`);
+  return { tenant, isNew: true };
+}
+
+// ── Send magic link (for returning users and new users alike) ────────────────
+
+export async function sendMagicLink(email: string, tenantId: string, name: string): Promise<void> {
+  const token = jwt.sign({ tenantId, email }, config.jwt.secret, { expiresIn: '7d' });
+  const loginUrl = `${config.app.url}/login?token=${token}`;
+  await sendLoginEmail(email, name, loginUrl);
+}
+
 export async function provisionTenant(input: ProvisionTenantInput): Promise<TenantDoc> {
   const db = await getDb();
   const tenantId = generateId();
@@ -70,7 +157,7 @@ export async function provisionTenant(input: ProvisionTenantInput): Promise<Tena
 
   // Generate login JWT and send welcome email
   const token = jwt.sign({ tenantId, email: input.email }, config.jwt.secret, { expiresIn: '7d' });
-  const loginUrl = `${config.app.url}/auth/login?token=${token}`;
+  const loginUrl = `${config.app.url}/login?token=${token}`;
   await sendWelcomeEmail(input.email, input.name, loginUrl);
 
   console.log(`[provisioning] Tenant created: ${tenantId} email=${input.email}`);
@@ -275,9 +362,9 @@ async function createQdrantCollection(agentId: string): Promise<void> {
 
 // ── Email ────────────────────────────────────────────────────────────────────
 
-async function sendWelcomeEmail(email: string, name: string, loginUrl: string): Promise<void> {
+async function sendLoginEmail(email: string, name: string, loginUrl: string): Promise<void> {
   if (!config.smtp.host) {
-    console.log(`[provisioning] SMTP not configured — skipping welcome email to ${email}`);
+    console.log(`[provisioning] SMTP not configured — magic link: ${loginUrl}`);
     return;
   }
   try {
@@ -289,18 +376,30 @@ async function sendWelcomeEmail(email: string, name: string, loginUrl: string): 
     await transporter.sendMail({
       from: config.smtp.from,
       to: email,
-      subject: 'Seu acesso ao Stack MCP está pronto!',
+      subject: 'Seu link de acesso ao Vendly',
       html: `
-        <p>Olá ${name},</p>
-        <p>Sua conta foi criada. Clique no link abaixo para acessar o painel e conectar seu WhatsApp:</p>
-        <p><a href="${loginUrl}">Acessar painel</a></p>
-        <p>O link expira em 7 dias.</p>
+        <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+          <h2 style="color:#0d9488">Vendly</h2>
+          <p>Olá${name ? ` ${name}` : ''},</p>
+          <p>Clique no botão abaixo para acessar seu painel. O link expira em 7 dias.</p>
+          <p style="margin:32px 0">
+            <a href="${loginUrl}"
+               style="background:#0d9488;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600">
+              Acessar o painel
+            </a>
+          </p>
+          <p style="color:#888;font-size:13px">Se não solicitou este acesso, ignore este email.</p>
+        </div>
       `,
     });
-    console.log(`[provisioning] Welcome email sent to ${email}`);
+    console.log(`[provisioning] Magic link sent to ${email}`);
   } catch (e) {
     console.error(`[provisioning] Email send failed:`, String(e));
   }
+}
+
+async function sendWelcomeEmail(email: string, name: string, loginUrl: string): Promise<void> {
+  return sendLoginEmail(email, name, loginUrl);
 }
 
 // ── Utils ────────────────────────────────────────────────────────────────────

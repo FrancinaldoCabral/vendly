@@ -61,5 +61,9 @@ export const config = {
   },
   woocommerce: {
     webhookSecret: process.env.WOOCOMMERCE_WEBHOOK_SECRET ?? '',
+    url: process.env.WC_URL ?? '',
+    consumerKey: process.env.WC_CONSUMER_KEY ?? '',
+    consumerSecret: process.env.WC_CONSUMER_SECRET ?? '',
+    subscriptionProductId: parseInt(process.env.WC_SUBSCRIPTION_PRODUCT_ID ?? '36779', 10),
   },
 };
