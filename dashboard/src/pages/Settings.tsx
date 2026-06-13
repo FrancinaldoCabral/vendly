@@ -27,7 +27,10 @@ export default function Settings() {
   return (
     <div>
       <Title level={3} style={{ marginTop: 0 }}><SettingOutlined /> Configurações</Title>
-      <Paragraph type="secondary">Informações da sua conta e do plano contratado.</Paragraph>
+      <Paragraph type="secondary">
+        Informações da sua conta Vendly e do plano contratado.
+        Para suporte, entre em contato em <a href="mailto:suporte@vendly.chat">suporte@vendly.chat</a>.
+      </Paragraph>
 
       <Card title="Minha conta" style={{ marginBottom: 16 }}>
         <Descriptions column={1} style={{ marginBottom: 16 }}>

@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Card, Typography, Spin, Result, Alert } from 'antd';
-import { RobotOutlined } from '@ant-design/icons';
+import { WhatsAppOutlined } from '@ant-design/icons';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 
-const { Title, Paragraph } = Typography;
+const { Title, Paragraph, Text } = Typography;
+
+const BRAND_GREEN = '#25d366';
 
 export default function Login() {
   const [params] = useSearchParams();
@@ -33,16 +35,35 @@ export default function Login() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f0f2f5' }}>
-      <Card style={{ width: 400, textAlign: 'center', borderRadius: 16 }} styles={{ body: { padding: 40 } }}>
-        <RobotOutlined style={{ fontSize: 48, color: '#1677ff', marginBottom: 16 }} />
-        <Title level={3} style={{ marginTop: 0 }}>Stack MCP</Title>
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'linear-gradient(135deg, #0a1f0a 0%, #0d2b0d 100%)',
+    }}>
+      <Card
+        style={{ width: 420, borderRadius: 16, border: 'none', boxShadow: '0 8px 40px #00000040' }}
+        styles={{ body: { padding: 48 } }}
+      >
+        {/* Logo */}
+        <div style={{ textAlign: 'center', marginBottom: 32 }}>
+          <div style={{
+            width: 64, height: 64, borderRadius: 16, background: BRAND_GREEN,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            margin: '0 auto 16px',
+          }}>
+            <WhatsAppOutlined style={{ fontSize: 34, color: '#fff' }} />
+          </div>
+          <Title level={2} style={{ margin: 0, fontWeight: 800, color: '#111' }}>vendly</Title>
+          <Text type="secondary" style={{ fontSize: 14 }}>Plataforma de agentes WhatsApp</Text>
+        </div>
 
         {status === 'loading' && (
-          <>
+          <div style={{ textAlign: 'center' }}>
             <Spin size="large" />
             <Paragraph type="secondary" style={{ marginTop: 16 }}>Autenticando…</Paragraph>
-          </>
+          </div>
         )}
 
         {status === 'success' && (
@@ -59,11 +80,15 @@ export default function Login() {
         )}
 
         {status === 'waiting' && (
-          <Paragraph type="secondary">
-            Para acessar o dashboard, clique no link enviado para o seu email.
-            <br /><br />
-            Se você não recebeu o email, entre em contato com o suporte.
-          </Paragraph>
+          <div style={{ textAlign: 'center' }}>
+            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              Clique no link enviado para o seu email para acessar o dashboard.
+            </Paragraph>
+            <Paragraph type="secondary" style={{ fontSize: 13, marginTop: 16 }}>
+              Não recebeu? Entre em contato com{' '}
+              <Text style={{ color: BRAND_GREEN }}>suporte@vendly.chat</Text>
+            </Paragraph>
+          </div>
         )}
       </Card>
     </div>

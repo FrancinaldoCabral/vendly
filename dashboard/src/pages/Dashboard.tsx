@@ -20,7 +20,7 @@ export default function Dashboard() {
         Bem-vindo{me?.name ? `, ${me.name}` : ''}!
       </Title>
       <Paragraph type="secondary">
-        Gerencie seus agentes de WhatsApp, base de conhecimento e postagens agendadas.
+        Gerencie seus agentes de WhatsApp, base de conhecimento e postagens agendadas na plataforma Vendly.
       </Paragraph>
 
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
