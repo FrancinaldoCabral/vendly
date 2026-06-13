@@ -1,0 +1,308 @@
+/**
+ * scheduler.ts — Scheduled post runner using node-cron
+ * Loads active scheduled_posts from MongoDB at startup and on demand.
+ * Executes pipeline[] steps (search, image_gen, fetch_url, compose) then posts.
+ */
+import cron from 'node-cron';
+import { getDb } from '../tools/mongodb.js';
+import { config } from '../config.js';
+
+// ── Types ───────────────────────────────────────────────────────────────────
+
+type PipelineStepType = 'search' | 'image_gen' | 'fetch_url' | 'compose';
+
+interface PipelineStep {
+  type: PipelineStepType;
+  config: Record<string, unknown>;
+}
+
+interface ScheduledPost {
+  _id: string;
+  agentId: string;
+  tenantId: string;
+  schedule: {
+    days: number[];   // 0=Sunday … 6=Saturday
+    time: string;     // 'HH:MM' in 24h
+    timezone?: string;
+  };
+  pipeline: PipelineStep[];
+  targets: Array<{
+    type: 'contact' | 'group' | 'status';
+    jid: string;
+  }>;
+  status: 'active' | 'paused';
+  lastRun?: Date;
+  nextRun?: Date;
+}
+
+// ── Cron registry ────────────────────────────────────────────────────────────
+
+const activeCrons = new Map<string, cron.ScheduledTask>();
+
+export async function startScheduler(): Promise<void> {
+  const db = await getDb();
+  const posts = await db.collection('scheduled_posts').find({ status: 'active' }).toArray() as unknown as ScheduledPost[];
+
+  for (const post of posts) {
+    schedulePost(post);
+  }
+
+  console.log(`[scheduler] Started — ${posts.length} active posts loaded`);
+}
+
+export function schedulePost(post: ScheduledPost): void {
+  stopPost(post._id);
+
+  const cronExpr = buildCronExpression(post.schedule.days, post.schedule.time);
+  if (!cronExpr) {
+    console.warn(`[scheduler] Invalid schedule for post ${post._id}:`, post.schedule);
+    return;
+  }
+
+  const tz = post.schedule.timezone ?? 'America/Sao_Paulo';
+  const task = cron.schedule(cronExpr, async () => {
+    console.log(`[scheduler] Firing post ${post._id} agent=${post.agentId}`);
+    try {
+      await runPostPipeline(post);
+      await updateLastRun(post._id);
+    } catch (e) {
+      console.error(`[scheduler] Pipeline error post=${post._id}:`, String(e));
+    }
+  }, { timezone: tz });
+
+  activeCrons.set(post._id, task);
+  console.log(`[scheduler] Scheduled post ${post._id}: ${cronExpr} (${tz})`);
+}
+
+export function stopPost(postId: string): void {
+  const existing = activeCrons.get(postId);
+  if (existing) {
+    existing.stop();
+    activeCrons.delete(postId);
+  }
+}
+
+export async function reloadPost(postId: string): Promise<void> {
+  const db = await getDb();
+  const post = await db.collection<ScheduledPost>('scheduled_posts').findOne({ _id: postId }) as ScheduledPost | null;
+  if (!post || post.status !== 'active') {
+    stopPost(postId);
+    return;
+  }
+  schedulePost(post);
+}
+
+// ── Pipeline execution ───────────────────────────────────────────────────────
+
+async function runPostPipeline(post: ScheduledPost): Promise<void> {
+  const context: Record<string, unknown> = {};
+
+  // Execute pipeline steps sequentially, passing context forward
+  for (const step of post.pipeline) {
+    try {
+      const result = await executePipelineStep(step, context, post.agentId);
+      Object.assign(context, result);
+    } catch (e) {
+      console.error(`[scheduler] Step ${step.type} failed:`, String(e));
+      return; // abort pipeline on step failure
+    }
+  }
+
+  // Post to all targets
+  const text = String(context.finalText ?? context.composedText ?? context.searchResult ?? '');
+  const imageUrl = String(context.imageUrl ?? '');
+
+  for (const target of post.targets) {
+    await sendToTarget(post.agentId, target, text, imageUrl);
+  }
+}
+
+async function executePipelineStep(
+  step: PipelineStep,
+  context: Record<string, unknown>,
+  agentId: string,
+): Promise<Record<string, unknown>> {
+  switch (step.type) {
+    case 'search': {
+      const query = String(step.config.query ?? context.topic ?? '');
+      const result = await webSearch(query);
+      return { searchResult: result };
+    }
+
+    case 'image_gen': {
+      const prompt = String(step.config.prompt ?? context.searchResult ?? context.topic ?? '');
+      const imageUrl = await generateImage(prompt, agentId);
+      return { imageUrl };
+    }
+
+    case 'fetch_url': {
+      const url = String(step.config.url ?? '');
+      if (!url) return {};
+      const r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      const text = await r.text();
+      return { fetchedContent: text.slice(0, 2000) };
+    }
+
+    case 'compose': {
+      const systemPrompt = String(step.config.systemPrompt ?? 'Você é um assistente criativo.');
+      const userPrompt = buildComposePrompt(step.config, context);
+      const composed = await callLLM(systemPrompt, userPrompt, agentId);
+      return { composedText: composed, finalText: composed };
+    }
+
+    default:
+      return {};
+  }
+}
+
+// ── LLM call (for compose step) ─────────────────────────────────────────────
+
+async function callLLM(system: string, user: string, _agentId: string): Promise<string> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 30_000);
+  try {
+    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: {
+        'Authorization': `Bearer ${config.openrouter.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-2.5-flash',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      }),
+    });
+    const data = await r.json() as { choices?: Array<{ message?: { content?: string } }> };
+    return data.choices?.[0]?.message?.content ?? '';
+  } finally { clearTimeout(t); }
+}
+
+function buildComposePrompt(stepConfig: Record<string, unknown>, context: Record<string, unknown>): string {
+  const template = String(stepConfig.prompt ?? 'Crie uma postagem sobre: {topic}');
+  let prompt = template;
+  for (const [k, v] of Object.entries(context)) {
+    prompt = prompt.replace(`{${k}}`, String(v));
+  }
+  return prompt;
+}
+
+// ── Web search (simple DuckDuckGo or config-defined endpoint) ────────────────
+
+async function webSearch(query: string): Promise<string> {
+  if (!query) return '';
+  try {
+    const encoded = encodeURIComponent(query);
+    const r = await fetch(
+      `https://api.duckduckgo.com/?q=${encoded}&format=json&no_html=1&skip_disambig=1`,
+      { signal: AbortSignal.timeout(10_000) },
+    );
+    const data = await r.json() as { AbstractText?: string; RelatedTopics?: Array<{ Text?: string }> };
+    const abstract = data.AbstractText ?? '';
+    const related = (data.RelatedTopics ?? []).slice(0, 3).map(t => t.Text ?? '').filter(Boolean).join('\n');
+    return [abstract, related].filter(Boolean).join('\n') || `Sem resultados para: ${query}`;
+  } catch (e) {
+    return `Erro na busca: ${String(e)}`;
+  }
+}
+
+// ── Image generation ─────────────────────────────────────────────────────────
+
+async function generateImage(prompt: string, _agentId: string): Promise<string> {
+  if (!prompt) return '';
+  try {
+    // Use OpenRouter with a vision/image model (e.g., black-forest-labs/flux-schnell)
+    const r = await fetch('https://openrouter.ai/api/v1/images/generations', {
+      method: 'POST',
+      signal: AbortSignal.timeout(30_000),
+      headers: {
+        'Authorization': `Bearer ${config.openrouter.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'black-forest-labs/flux-schnell',
+        prompt,
+        n: 1,
+      }),
+    });
+    const data = await r.json() as { data?: Array<{ url?: string }> };
+    return data.data?.[0]?.url ?? '';
+  } catch (e) {
+    console.error(`[scheduler] Image gen failed:`, String(e));
+    return '';
+  }
+}
+
+// ── Evolution send helpers ───────────────────────────────────────────────────
+
+async function sendToTarget(
+  agentId: string,
+  target: ScheduledPost['targets'][number],
+  text: string,
+  imageUrl: string,
+): Promise<void> {
+  const db = await getDb();
+  const agent = await db.collection<{ _id: string; evolutionInstance?: string }>('agents').findOne({ _id: agentId });
+  if (!agent?.evolutionInstance) return;
+  const instance = agent.evolutionInstance;
+
+  if (target.type === 'status') {
+    // WhatsApp Status (Story)
+    await sendEvolutionStatus(instance, text, imageUrl);
+    return;
+  }
+
+  if (imageUrl) {
+    await sendEvolutionMedia(instance, target.jid, text, imageUrl);
+  } else if (text) {
+    await sendEvolutionText(instance, target.jid, text);
+  }
+}
+
+async function sendEvolutionText(instance: string, jid: string, text: string): Promise<void> {
+  await fetch(`${config.evolution.url}/message/sendText/${instance}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
+    body: JSON.stringify({ number: jid, text }),
+  });
+}
+
+async function sendEvolutionMedia(instance: string, jid: string, caption: string, mediaUrl: string): Promise<void> {
+  await fetch(`${config.evolution.url}/message/sendMedia/${instance}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
+    body: JSON.stringify({ number: jid, mediatype: 'image', media: mediaUrl, caption }),
+  });
+}
+
+async function sendEvolutionStatus(instance: string, text: string, mediaUrl: string): Promise<void> {
+  const payload: Record<string, unknown> = { type: mediaUrl ? 'image' : 'text', content: mediaUrl || text };
+  if (mediaUrl && text) payload.caption = text;
+  await fetch(`${config.evolution.url}/message/sendStatus/${instance}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
+    body: JSON.stringify(payload),
+  });
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function buildCronExpression(days: number[], time: string): string | null {
+  const [hStr, mStr] = time.split(':');
+  const h = parseInt(hStr ?? '', 10);
+  const m = parseInt(mStr ?? '', 10);
+  if (isNaN(h) || isNaN(m) || days.length === 0) return null;
+  const dayList = days.join(',');
+  return `${m} ${h} * * ${dayList}`;
+}
+
+async function updateLastRun(postId: string): Promise<void> {
+  const db = await getDb();
+  await db.collection<ScheduledPost>('scheduled_posts').updateOne(
+    { _id: postId },
+    { $set: { lastRun: new Date() } },
+  );
+}
