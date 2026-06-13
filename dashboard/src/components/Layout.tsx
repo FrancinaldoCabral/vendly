@@ -3,7 +3,7 @@ import { Layout as AntLayout, Menu, Button, Typography, Avatar, Dropdown } from 
 import {
   RobotOutlined, BookOutlined, CalendarOutlined, MessageOutlined,
   SettingOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined,
-  UserOutlined, WhatsAppOutlined,
+  UserOutlined, CommentOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
@@ -13,9 +13,8 @@ import { api } from '../lib/api';
 const { Header, Sider, Content } = AntLayout;
 const { Text } = Typography;
 
-// Vendly brand green (dark sidebar variant)
-const BRAND_BG = '#0a1f0a';
-const BRAND_GREEN = '#25d366';
+const BRAND_BG = '#031a18';
+const BRAND_PRIMARY = '#0d9488';
 
 const menuItems = [
   { key: '/agents', icon: <RobotOutlined />, label: 'Agentes' },
@@ -65,7 +64,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           overflow: 'hidden',
           cursor: 'pointer',
         }} onClick={() => nav('/')}>
-          <WhatsAppOutlined style={{ fontSize: 22, color: BRAND_GREEN, flexShrink: 0 }} />
+          <CommentOutlined style={{ fontSize: 22, color: BRAND_PRIMARY, flexShrink: 0 }} />
           {!collapsed && (
             <span style={{ color: '#fff', fontSize: 18, fontWeight: 800, letterSpacing: 0.5, lineHeight: 1 }}>
               vendly
@@ -102,7 +101,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               onMouseEnter={e => (e.currentTarget.style.background = '#f5f5f5')}
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
             >
-              <Avatar size={28} style={{ background: BRAND_GREEN }} icon={<UserOutlined />} />
+              <Avatar size={28} style={{ background: BRAND_PRIMARY }} icon={<UserOutlined />} />
               <Text style={{ fontSize: 13 }}>{me?.email ?? '…'}</Text>
             </div>
           </Dropdown>
