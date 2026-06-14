@@ -210,50 +210,67 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentD
 
 export async function deprovisionAgent(agentId: string, tenantId: string): Promise<void> {
   const db = await getDb();
-  const agent = await db.collection<AgentDoc>('agents').findOne({ _id: agentId, tenantId });
-  if (!agent) return;
+  // Allow admin calls (empty tenantId) to find by id alone
+  const filter: Record<string, unknown> = { _id: agentId };
+  if (tenantId) filter.tenantId = tenantId;
+  const agent = await db.collection<AgentDoc>('agents').findOne(filter);
+  if (!agent) {
+    console.warn(`[provisioning] deprovisionAgent: not found agentId=${agentId} tenantId=${tenantId}`);
+    return;
+  }
 
   const evUrl = config.evolution.url.replace(/\/$/, '');
   const evHeaders = { apikey: config.evolution.apiKey };
 
-  // Logout first (required for connected instances)
+  // 1. Logout Evolution instance (graceful disconnect, ignore errors)
   try {
-    const logoutRes = await fetch(`${evUrl}/instance/logout/${agent.evolutionInstance}`, {
+    const r = await fetch(`${evUrl}/instance/logout/${agent.evolutionInstance}`, {
       method: 'DELETE', headers: evHeaders,
     });
-    console.log(`[provisioning] Evolution logout ${agent.evolutionInstance}: ${logoutRes.status}`);
+    console.log(`[provisioning] Evolution logout ${agent.evolutionInstance}: ${r.status}`);
   } catch (e) {
     console.warn(`[provisioning] Evolution logout failed (continuing):`, String(e));
   }
 
-  // Delete Evolution instance
+  // 2. Delete Evolution instance — verified: DELETE /instance/delete/{name} → 200 {"status":"SUCCESS"}
   try {
-    const deleteRes = await fetch(`${evUrl}/instance/delete/${agent.evolutionInstance}`, {
+    const r = await fetch(`${evUrl}/instance/delete/${agent.evolutionInstance}`, {
       method: 'DELETE', headers: evHeaders,
     });
-    console.log(`[provisioning] Evolution delete ${agent.evolutionInstance}: ${deleteRes.status}`);
-    if (!deleteRes.ok) {
-      const txt = await deleteRes.text();
-      console.error(`[provisioning] Evolution delete error body: ${txt.slice(0, 300)}`);
-    }
+    const body = await r.text();
+    console.log(`[provisioning] Evolution delete ${agent.evolutionInstance}: ${r.status} ${body.slice(0, 200)}`);
   } catch (e) {
     console.error(`[provisioning] Evolution delete failed:`, String(e));
   }
 
-  // Delete Qdrant collection
+  // 3. Delete Chatwoot inbox — verified: DELETE /api/v1/accounts/:id/inboxes/:inboxId → 200
+  if (agent.chatwootInboxId) {
+    try {
+      const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+      const r = await fetch(`${cwUrl}/api/v1/accounts/${config.chatwoot.accountId}/inboxes/${agent.chatwootInboxId}`, {
+        method: 'DELETE',
+        headers: { 'api_access_token': config.chatwoot.apiKey },
+      });
+      console.log(`[provisioning] Chatwoot inbox delete ${agent.chatwootInboxId}: ${r.status}`);
+    } catch (e) {
+      console.error(`[provisioning] Chatwoot inbox delete failed:`, String(e));
+    }
+  }
+
+  // 4. Delete Qdrant collection
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (config.qdrant.apiKey) headers['api-key'] = config.qdrant.apiKey;
     await fetch(`${config.qdrant.url.replace(/\/$/, '')}/collections/agent_${agentId}`, {
-      method: 'DELETE',
-      headers,
+      method: 'DELETE', headers,
     });
+    console.log(`[provisioning] Qdrant collection deleted: agent_${agentId}`);
   } catch (e) {
     console.error(`[provisioning] Qdrant collection delete failed:`, String(e));
   }
 
-  await db.collection<AgentDoc>('agents').deleteOne({ _id: agentId, tenantId });
-  console.log(`[provisioning] Agent deprovisioned: ${agentId}`);
+  await db.collection<AgentDoc>('agents').deleteOne(filter);
+  console.log(`[provisioning] Agent deprovisioned: ${agentId} instance=${agent.evolutionInstance} inbox=${agent.chatwootInboxId}`);
 }
 
 // ── Evolution ────────────────────────────────────────────────────────────────
