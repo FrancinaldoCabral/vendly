@@ -116,13 +116,32 @@ export async function findOrCreateTenant(
 ): Promise<{ tenant: TenantDoc; isNew: boolean; chatwootSsoUrl?: string }> {
   const db = await getDb();
   const existing = await db.collection<TenantDoc>('tenants').findOne({ email });
-  if (existing) return { tenant: existing, isNew: false };
+
+  // Tenant exists — heal missing Chatwoot account if needed (e.g. transient failure on prior login)
+  if (existing) {
+    if (!existing.chatwoot) {
+      console.log(`[provisioning] Tenant ${existing._id} missing Chatwoot — retrying creation`);
+      const cwAccount = await createChatwootAccount(email, existing.name, existing._id);
+      if (cwAccount) {
+        await db.collection<TenantDoc>('tenants').updateOne(
+          { _id: existing._id },
+          { $set: { chatwoot: { accountId: cwAccount.accountId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl } } },
+        );
+        existing.chatwoot = { accountId: cwAccount.accountId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl };
+        console.log(`[provisioning] Tenant ${existing._id} Chatwoot healed: accountId=${cwAccount.accountId}`);
+      }
+    }
+    return { tenant: existing, isNew: false };
+  }
 
   const tenantId = generateId();
   const name = wcInfo?.wcUserName ?? email.split('@')[0];
 
   // Create Chatwoot account for this tenant (uses internal email to avoid conflicts with existing Chatwoot users)
   const cwAccount = await createChatwootAccount(email, name, tenantId);
+  if (!cwAccount) {
+    throw new Error('Falha ao criar conta no CRM. Tente novamente em instantes.');
+  }
 
   const tenant: TenantDoc = {
     _id: tenantId,
@@ -132,12 +151,12 @@ export async function findOrCreateTenant(
     plan: 'starter',
     status: 'active',
     createdAt: new Date(),
-    chatwoot: cwAccount ? { accountId: cwAccount.accountId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl } : undefined,
+    chatwoot: { accountId: cwAccount.accountId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl },
   };
 
   await db.collection<TenantDoc>('tenants').insertOne(tenant);
-  console.log(`[provisioning] Tenant created: ${tenantId} email=${email} chatwootAccountId=${cwAccount?.accountId}`);
-  return { tenant, isNew: true, chatwootSsoUrl: cwAccount?.ssoUrl };
+  console.log(`[provisioning] Tenant created: ${tenantId} email=${email} chatwootAccountId=${cwAccount.accountId}`);
+  return { tenant, isNew: true, chatwootSsoUrl: cwAccount.ssoUrl };
 }
 
 // ── Send magic link (for returning users and new users alike) ────────────────
