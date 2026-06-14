@@ -601,7 +601,7 @@ async function registerChatwootWebhook(accountId: number, apiKey: string, webhoo
 
 // ── Repair / reprovision ─────────────────────────────────────────────────────
 
-/** Generate a fresh Chatwoot SSO URL for a tenant. Falls back to listing platform users if userId not stored. */
+/** Generate a fresh Chatwoot SSO URL for a tenant. Falls back to account_users endpoint if userId not stored. */
 export async function getChatwootSsoUrl(tenantId: string, accountId: number, userId?: number): Promise<string | null> {
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
   const platHeaders = { 'Content-Type': 'application/json', 'api_access_token': config.chatwoot.platformKey };
@@ -609,15 +609,23 @@ export async function getChatwootSsoUrl(tenantId: string, accountId: number, use
   let uid = userId;
 
   if (!uid) {
-    // Fallback: find user by internal email via Platform API
-    const internalEmail = `tenant-${tenantId}@accounts.vendly.chat`;
+    // Fallback: list account users and pick the first administrator
     try {
-      const r = await fetch(`${cwUrl}/platform/api/v1/users?email=${encodeURIComponent(internalEmail)}`, { headers: platHeaders });
+      const r = await fetch(`${cwUrl}/platform/api/v1/accounts/${accountId}/account_users`, { headers: platHeaders });
       if (r.ok) {
-        const data = await r.json() as { payload?: Array<{ id: number; email: string }> } | Array<{ id: number; email: string }>;
-        const users = Array.isArray(data) ? data : (data as { payload?: Array<{ id: number; email: string }> }).payload ?? [];
-        const found = users.find((u: { id: number; email: string }) => u.email === internalEmail);
-        uid = found?.id;
+        const users = await r.json() as Array<{ user_id: number; role: string }>;
+        const admin = Array.isArray(users) ? users.find(u => u.role === 'administrator') ?? users[0] : null;
+        uid = admin?.user_id;
+        // Persist userId so future calls don't need this lookup
+        if (uid) {
+          try {
+            const db = await getDb();
+            await db.collection('tenants').updateOne(
+              { _id: tenantId } as Record<string, unknown>,
+              { $set: { 'chatwoot.userId': uid } },
+            );
+          } catch { /* non-fatal */ }
+        }
       }
     } catch (e) {
       console.error('[provisioning] SSO user lookup failed:', String(e));
@@ -632,6 +640,7 @@ export async function getChatwootSsoUrl(tenantId: string, accountId: number, use
       const data = await r.json() as { url?: string };
       return data.url ?? null;
     }
+    console.warn(`[provisioning] SSO login endpoint status=${r.status} for uid=${uid}`);
   } catch (e) {
     console.error('[provisioning] SSO link generation failed:', String(e));
   }
