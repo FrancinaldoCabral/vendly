@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import jwt from 'jsonwebtoken';
-import { requireAuth, signTenantToken } from './auth.js';
+import { requireAuth, requireAdmin, signTenantToken } from './auth.js';
 import { config } from '../config.js';
 import { checkWcSubscription, findOrCreateTenant, sendMagicLink } from '../services/provisioning.js';
 import { tenantsRouter } from './routes/tenants.js';
@@ -8,6 +8,8 @@ import { agentsRouter } from './routes/agents.js';
 import { knowledgeRouter } from './routes/knowledge.js';
 import { scheduledPostsRouter } from './routes/scheduled_posts.js';
 import { conversationsRouter } from './routes/conversations.js';
+import { getClient } from '../tools/mongodb.js';
+import { getRedis } from '../tools/redis.js';
 
 export const apiRouter = Router();
 
@@ -118,6 +120,51 @@ apiRouter.post('/auth/token', async (req, res) => {
     res.json({ token: sessionToken, tenantId: payload.tenantId });
   } catch {
     res.status(401).json({ error: 'Token inválido ou expirado' });
+  }
+});
+
+// ── Admin: reset all tenant data (no JWT needed — admin key only) ─────────────
+apiRouter.post('/admin/reset', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const results: Record<string, string> = {};
+
+    // 1. Drop MongoDB vendly database
+    try {
+      const client = await getClient();
+      await client.db('vendly').dropDatabase();
+      results.mongodb = 'dropped database vendly';
+    } catch (e) { results.mongodb = `error: ${String(e)}`; }
+
+    // 2. Flush all Redis keys
+    try {
+      const redis = getRedis();
+      await redis.flushall();
+      results.redis = 'FLUSHALL ok';
+    } catch (e) { results.redis = `error: ${String(e)}`; }
+
+    // 3. Delete Qdrant agent_* collections
+    const qdrantBase = config.qdrant.url.replace(/\/$/, '');
+    const qHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (config.qdrant.apiKey) qHeaders['api-key'] = config.qdrant.apiKey;
+    try {
+      const listRes = await fetch(`${qdrantBase}/collections`, { headers: qHeaders });
+      if (listRes.ok) {
+        const { result } = await listRes.json() as { result: { collections: { name: string }[] } };
+        const agentCols = result.collections.filter(c => c.name.startsWith('agent_'));
+        const deleted: string[] = [];
+        for (const col of agentCols) {
+          const d = await fetch(`${qdrantBase}/collections/${col.name}`, { method: 'DELETE', headers: qHeaders });
+          if (d.ok) deleted.push(col.name);
+        }
+        results.qdrant = deleted.length ? `deleted: ${deleted.join(', ')}` : 'no agent_* collections';
+      } else {
+        results.qdrant = `list failed: ${listRes.status}`;
+      }
+    } catch (e) { results.qdrant = `error: ${String(e)}`; }
+
+    res.json({ ok: true, results });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
   }
 });
 
