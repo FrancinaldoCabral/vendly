@@ -4,6 +4,7 @@ import Layout from './components/Layout';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Agents from './pages/Agents';
+import Connections from './pages/Connections';
 import KnowledgeBase from './pages/KnowledgeBase';
 import ScheduledPosts from './pages/ScheduledPosts';
 import Conversations from './pages/Conversations';
@@ -22,6 +23,7 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
+          <Route path="/connections" element={<PrivateRoute><Connections /></PrivateRoute>} />
           <Route path="/agents" element={<PrivateRoute><Agents /></PrivateRoute>} />
           <Route path="/knowledge" element={<PrivateRoute><KnowledgeBase /></PrivateRoute>} />
           <Route path="/scheduled-posts" element={<PrivateRoute><ScheduledPosts /></PrivateRoute>} />

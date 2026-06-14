@@ -1,5 +1,5 @@
 import { getToken } from './auth';
-import type { Tenant, Agent, KnowledgePoint, ScheduledPost, Conversation } from './types';
+import type { Tenant, Agent, KnowledgePoint, ScheduledPost, Conversation, Connection, ContactFilter, CatalogTool } from './types';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
@@ -31,6 +31,18 @@ export const api = {
   getMe: () => req<Tenant>('/tenants/me'),
   updateMe: (data: Partial<Tenant>) =>
     req<Tenant>('/tenants/me', { method: 'PUT', body: JSON.stringify(data) }),
+  getCrmLink: () => req<{ url: string }>('/tenants/me/chatwoot-sso'),
+
+  // WhatsApp connections
+  getConnections: () => req<Connection[]>('/connections'),
+  createConnection: (name: string) =>
+    req<{ connection: Connection; qrCodeUrl: string }>('/connections', { method: 'POST', body: JSON.stringify({ name }) }),
+  deleteConnection: (id: string) => req<{ ok: boolean }>(`/connections/${id}`, { method: 'DELETE' }),
+  getConnectionQr: (id: string) => req<{ base64: string | null; code: string | null }>(`/connections/${id}/qr`),
+  getConnectionStatus: (id: string) => req<{ connected: boolean; connectionStatus: string }>(`/connections/${id}/status`),
+
+  // Tool catalog (friendly built-in tools)
+  getToolCatalog: () => req<CatalogTool[]>('/tool-catalog'),
 
   // Agents
   getAgents: () => req<Agent[]>('/agents'),
@@ -42,6 +54,9 @@ export const api = {
   deleteAgent: (id: string) => req<{ ok: boolean }>(`/agents/${id}`, { method: 'DELETE' }),
   getAgentQr: (id: string) => req<{ base64: string | null; code: string | null }>(`/agents/${id}/qr`),
   getAgentStatus: (id: string) => req<{ agentStatus: string; connected: boolean }>(`/agents/${id}/status`),
+  getContactFilter: (id: string) => req<{ contactFilter: ContactFilter }>(`/agents/${id}/contact-filter`),
+  setContactFilter: (id: string, filter: ContactFilter) =>
+    req<{ contactFilter: ContactFilter }>(`/agents/${id}/contact-filter`, { method: 'PUT', body: JSON.stringify(filter) }),
 
   // Knowledge
   getKnowledge: (agentId: string, params?: Record<string, string>) => {

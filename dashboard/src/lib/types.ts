@@ -15,6 +15,32 @@ export interface CustomApi {
   method: 'GET' | 'POST' | 'PUT' | 'DELETE';
   headers?: { key: string; value: string }[];
   schema: Record<string, unknown>;
+  kind?: 'responding' | 'void' | 'async';
+  waitingMessage?: string;
+}
+
+export interface Connection {
+  _id: string;
+  tenantId: string;
+  name: string;
+  evolutionInstance?: string;
+  status: 'pending_qr' | 'active' | 'paused';
+  agentCount?: number;
+  createdAt?: string;
+}
+
+export interface ContactFilter {
+  mode: 'blacklist' | 'whitelist';
+  contacts: string[];
+  groups: string[];
+}
+
+export interface CatalogTool {
+  id: string;
+  label: string;
+  description: string;
+  category: string;
+  behavior: string;
 }
 
 export interface GroupConfig {
@@ -26,14 +52,18 @@ export interface GroupConfig {
 export interface Agent {
   _id: string;
   tenantId: string;
+  connectionId?: string;
   name: string;
   assistantName?: string;
   evolutionInstance?: string;
   chatwootInboxId?: string;
   systemPrompt?: string;
   tools: string[];
+  builtinTools?: string[];
   customApis: CustomApi[];
   groupConfig?: GroupConfig;
+  contactFilter?: ContactFilter;
+  priority?: number;
   model?: string;
   temperature?: number;
   maxIter?: number;

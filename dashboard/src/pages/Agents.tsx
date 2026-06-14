@@ -1,149 +1,43 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Typography, Button, Card, Badge, Space, Modal, Form, Input, Switch, Select,
-  Collapse, Popconfirm, Tag, message, Result, Spin, AutoComplete, Alert,
-  Tabs, Divider,
+  Popconfirm, Tag, message, Result, Divider, Tabs, Alert, Checkbox, Empty,
 } from 'antd';
 import {
-  PlusOutlined, EditOutlined, DeleteOutlined, QrcodeOutlined, ReloadOutlined,
-  RobotOutlined, ApiOutlined, SaveOutlined, TeamOutlined,
+  PlusOutlined, EditOutlined, DeleteOutlined, RobotOutlined, ApiOutlined,
+  TeamOutlined, FilterOutlined, ToolOutlined, WhatsAppOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
-import type { Agent, CustomApi } from '../lib/types';
+import type { Agent, CustomApi, ContactFilter, CatalogTool } from '../lib/types';
 
 const { Title, Paragraph, Text } = Typography;
 const { TextArea } = Input;
 
-const POPULAR_MODELS = [
-  { value: 'google/gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite (rápido e barato)' },
-  { value: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash (equilibrado)' },
-  { value: 'openai/gpt-4.1-mini', label: 'GPT 4.1 mini' },
-  { value: 'anthropic/claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
-];
-
-const BUILTIN_TOOLS = [
-  { value: 'evolution', label: 'Evolution API (WhatsApp)' },
-  { value: 'chatwoot', label: 'Chatwoot (gestão de conversas)' },
-  { value: 'mongo', label: 'MongoDB (dados de clientes)' },
-  { value: 'qdrant', label: 'Qdrant (busca semântica)' },
-  { value: 'n8n', label: 'N8N (automações externas)' },
-  { value: 'system', label: 'System (limpeza de sessões)' },
-];
-
 function statusBadge(status: Agent['status']) {
   if (status === 'active') return { color: 'success' as const, label: 'Ativo' };
-  if (status === 'pending_qr') return { color: 'warning' as const, label: 'Aguardando QR' };
+  if (status === 'pending_qr') return { color: 'warning' as const, label: 'Aguardando WhatsApp' };
   if (status === 'paused') return { color: 'default' as const, label: 'Pausado' };
   return { color: 'error' as const, label: 'Erro' };
 }
 
-// ── QR Code Modal ────────────────────────────────────────────────────────────
+// ── Integrations (custom APIs) editor ────────────────────────────────────────
 
-function QrModal({ agentId, agentName, open, onClose }: { agentId: string; agentName: string; open: boolean; onClose: () => void }) {
-  const [qrBase64, setQrBase64] = useState<string | null>(null);
-  const [qrLoading, setQrLoading] = useState(false);
-  const [qrError, setQrError] = useState('');
-  const [connected, setConnected] = useState(false);
-  const statusRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const refreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const qc = useQueryClient();
-
-  const fetchQr = useCallback(async () => {
-    setQrLoading(true);
-    setQrError('');
-    try {
-      const d = await api.getAgentQr(agentId);
-      if (d.base64) {
-        setQrBase64(d.base64);
-      } else {
-        setQrError('QR não disponível ainda — aguarde ou clique em Atualizar.');
-      }
-    } catch (e) {
-      setQrError((e as Error).message || 'Erro ao buscar QR code.');
-    }
-    setQrLoading(false);
-  }, [agentId]);
-
-  useEffect(() => {
-    if (!open) {
-      if (statusRef.current) clearInterval(statusRef.current);
-      if (refreshRef.current) clearInterval(refreshRef.current);
-      return;
-    }
-    setConnected(false);
-    setQrBase64(null);
-    setQrError('');
-    fetchQr();
-
-    // Poll connection state every 3s — check both Evolution state and MongoDB status (updated by webhook)
-    statusRef.current = setInterval(async () => {
-      try {
-        const d = await api.getAgentStatus(agentId);
-        if (d.connected || d.agentStatus === 'active') {
-          setConnected(true);
-          if (statusRef.current) clearInterval(statusRef.current);
-          if (refreshRef.current) clearInterval(refreshRef.current);
-          qc.invalidateQueries({ queryKey: ['agents'] });
-        }
-      } catch { /* ignore */ }
-    }, 3000);
-
-    // Refresh QR every 10s (QR codes expire after ~20–30s)
-    refreshRef.current = setInterval(fetchQr, 10_000);
-
-    return () => {
-      if (statusRef.current) clearInterval(statusRef.current);
-      if (refreshRef.current) clearInterval(refreshRef.current);
-    };
-  }, [open, agentId, fetchQr, qc]);
-
-  return (
-    <Modal
-      title={`Conectar WhatsApp — ${agentName}`}
-      open={open}
-      onCancel={onClose}
-      footer={connected ? null : [
-        <Button key="refresh" loading={qrLoading} icon={<ReloadOutlined />} onClick={fetchQr}>Atualizar QR</Button>,
-        <Button key="close" onClick={onClose}>Fechar</Button>,
-      ]}
-      width={420}
-    >
-      {connected ? (
-        <Result status="success" title="WhatsApp conectado!" />
-      ) : (
-        <div style={{ textAlign: 'center', padding: '8px 0' }}>
-          <div style={{ width: 280, height: 280, margin: '0 auto 16px', background: '#f9f9f9', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', border: '2px solid #f0f0f0' }}>
-            {qrLoading ? <Spin size="large" /> : qrBase64 ? (
-              <img src={qrBase64} alt="QR Code" style={{ width: '100%', height: '100%', objectFit: 'contain', borderRadius: 10 }} />
-            ) : (
-              <div style={{ padding: 16 }}>
-                <Text type="secondary" style={{ fontSize: 13 }}>Aguardando QR code…</Text>
-              </div>
-            )}
-          </div>
-          {qrError && (
-            <Alert type="warning" message={qrError} showIcon style={{ marginBottom: 12, textAlign: 'left' }} />
-          )}
-          <Paragraph type="secondary" style={{ fontSize: 13 }}>
-            No celular: <Text strong>WhatsApp → Dispositivos conectados → Conectar dispositivo</Text>
-          </Paragraph>
-        </div>
-      )}
-    </Modal>
-  );
-}
-
-// ── Custom API Editor ────────────────────────────────────────────────────────
+const KIND_OPTS = [
+  { value: 'responding', label: 'Responde — o agente espera o resultado e usa na resposta' },
+  { value: 'void', label: 'Ação — o agente executa e só confirma para o cliente' },
+  { value: 'async', label: 'Assíncrona — demora; o agente avisa "estou verificando" e responde quando chegar' },
+];
 
 function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (apis: CustomApi[]) => void }) {
   const [editIdx, setEditIdx] = useState<number | null>(null);
   const [form] = Form.useForm();
 
-  const openNew = () => { form.resetFields(); form.setFieldsValue({ method: 'GET', headers: [], schema: '{}' }); setEditIdx(-1); };
+  const openNew = () => { form.resetFields(); form.setFieldsValue({ method: 'GET', kind: 'responding', schema: '{}' }); setEditIdx(-1); };
   const openEdit = (i: number) => {
     const a = apis[i];
-    form.setFieldsValue({ ...a, headers: a.headers ?? [], schema: JSON.stringify(a.schema, null, 2) });
+    form.setFieldsValue({ ...a, kind: a.kind ?? 'responding', schema: JSON.stringify(a.schema ?? {}, null, 2) });
     setEditIdx(i);
   };
   const remove = (i: number) => onChange(apis.filter((_, idx) => idx !== i));
@@ -158,11 +52,19 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
     });
   };
 
+  const kind = Form.useWatch('kind', form);
+
   return (
     <div>
+      <Paragraph type="secondary" style={{ fontSize: 13 }}>
+        Conecte o agente a sistemas externos (seu sistema de pedidos, estoque, entregas…). Você descreve o que a
+        ferramenta faz e o agente decide quando usar.
+      </Paragraph>
       {apis.map((a, i) => (
         <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #f0f0f0' }}>
-          <Tag color="blue">{a.method}</Tag>
+          <Tag color={a.kind === 'async' ? 'purple' : a.kind === 'void' ? 'orange' : 'blue'}>
+            {a.kind === 'async' ? 'Assíncrona' : a.kind === 'void' ? 'Ação' : 'Responde'}
+          </Tag>
           <Text strong style={{ fontSize: 13 }}>{a.name}</Text>
           <Text type="secondary" style={{ fontSize: 12, flex: 1 }}>{a.description}</Text>
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(i)} />
@@ -172,11 +74,11 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
         </div>
       ))}
       <Button type="dashed" icon={<PlusOutlined />} onClick={openNew} style={{ marginTop: 8 }}>
-        Adicionar API
+        Adicionar ferramenta
       </Button>
 
       <Modal
-        title={editIdx === -1 ? 'Nova API' : 'Editar API'}
+        title={editIdx === -1 ? 'Nova ferramenta' : 'Editar ferramenta'}
         open={editIdx !== null}
         onOk={save}
         onCancel={() => setEditIdx(null)}
@@ -184,20 +86,32 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
         okText="Salvar"
       >
         <Form form={form} layout="vertical" style={{ marginTop: 12 }}>
-          <Form.Item name="name" label="Nome da ferramenta (snake_case)" rules={[{ required: true }]}>
-            <Input placeholder="buscar_produto" />
+          <Form.Item name="name" label="Nome curto (sem espaços)" rules={[{ required: true }]}
+            extra="Use esse nome no prompt do agente para orientá-lo. Ex.: consultar_pedido">
+            <Input placeholder="consultar_pedido" />
           </Form.Item>
-          <Form.Item name="description" label="Descrição (para o LLM)" rules={[{ required: true }]}>
-            <Input placeholder="Busca produto pelo nome no catálogo" />
+          <Form.Item name="description" label="O que essa ferramenta faz" rules={[{ required: true }]}>
+            <Input placeholder="Consulta o status de um pedido pelo número" />
           </Form.Item>
-          <Form.Item name="url" label="URL" rules={[{ required: true }]}>
-            <Input placeholder="https://api.meusite.com/produtos/{nome}" />
+          <Form.Item name="kind" label="Como ela se comporta">
+            <Select options={KIND_OPTS} />
           </Form.Item>
-          <Form.Item name="method" label="Método HTTP">
+          {kind === 'async' && (
+            <Form.Item name="waitingMessage" label="O que o agente está verificando (texto curto)"
+              extra='Usado na mensagem "estou verificando ___…".'>
+              <Input placeholder="o status do seu pedido" />
+            </Form.Item>
+          )}
+          <Form.Item name="url" label="Endereço (URL)" rules={[{ required: true }]}
+            extra="Pode usar {parametro} para inserir valores. Ex.: https://meusistema.com/pedidos/{numero}">
+            <Input placeholder="https://meusistema.com/pedidos/{numero}" />
+          </Form.Item>
+          <Form.Item name="method" label="Tipo de chamada">
             <Select options={['GET', 'POST', 'PUT', 'DELETE'].map(m => ({ value: m, label: m }))} />
           </Form.Item>
-          <Form.Item name="schema" label="Parâmetros (JSON Schema)">
-            <TextArea rows={4} style={{ fontFamily: 'monospace', fontSize: 12 }} placeholder='{"type":"object","properties":{"nome":{"type":"string"}},"required":["nome"]}' />
+          <Form.Item name="schema" label="Parâmetros (avançado, JSON Schema)"
+            extra="Deixe {} se a ferramenta não precisa de parâmetros.">
+            <TextArea rows={3} style={{ fontFamily: 'monospace', fontSize: 12 }} placeholder='{"type":"object","properties":{"numero":{"type":"string"}},"required":["numero"]}' />
           </Form.Item>
         </Form>
       </Modal>
@@ -205,72 +119,116 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
   );
 }
 
+// ── Built-in tool catalog (friendly toggles) ─────────────────────────────────
+
+function ToolCatalog({ value, onChange, catalog }: { value: string[]; onChange: (v: string[]) => void; catalog: CatalogTool[] }) {
+  const byCategory = useMemo(() => {
+    const m = new Map<string, CatalogTool[]>();
+    for (const t of catalog) { if (!m.has(t.category)) m.set(t.category, []); m.get(t.category)!.push(t); }
+    return Array.from(m.entries());
+  }, [catalog]);
+
+  const toggle = (id: string, on: boolean) => {
+    onChange(on ? Array.from(new Set([...value, id])) : value.filter(v => v !== id));
+  };
+
+  return (
+    <div>
+      <Paragraph type="secondary" style={{ fontSize: 13 }}>
+        Ações que o agente pode realizar durante a conversa. Ative só o que fizer sentido para o seu negócio.
+      </Paragraph>
+      {byCategory.map(([cat, tools]) => (
+        <div key={cat} style={{ marginBottom: 14 }}>
+          <Text strong style={{ fontSize: 13 }}>{cat}</Text>
+          <div style={{ marginTop: 6 }}>
+            {tools.map(t => (
+              <div key={t.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 0' }}>
+                <Checkbox checked={value.includes(t.id)} onChange={e => toggle(t.id, e.target.checked)} />
+                <div>
+                  <Text style={{ fontSize: 13 }}>{t.label}</Text>
+                  <div><Text type="secondary" style={{ fontSize: 12 }}>{t.description}</Text></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Prompt mask: highlight which configured tools are referenced in the prompt ─
+
+function PromptToolMask({ prompt, toolNames }: { prompt: string; toolNames: string[] }) {
+  const referenced = toolNames.filter(n => n && prompt.toLowerCase().includes(n.toLowerCase()));
+  if (toolNames.length === 0) return null;
+  return (
+    <Alert
+      type={referenced.length ? 'success' : 'info'}
+      showIcon
+      style={{ marginTop: 8 }}
+      message={referenced.length
+        ? <span>Ferramentas citadas no texto: {referenced.map(n => <Tag key={n} color="green">{n}</Tag>)}</span>
+        : 'Dica: cite o nome das ferramentas no texto para orientar o agente a usá-las.'}
+    />
+  );
+}
+
 // ── Agent Form Modal ─────────────────────────────────────────────────────────
 
-function AgentModal({ agent, open, onClose }: {
+const EMPTY_FILTER: ContactFilter = { mode: 'blacklist', contacts: [], groups: [] };
+
+function AgentModal({ agent, open, onClose, catalog, connectionId }: {
   agent: Agent | null;
   open: boolean;
   onClose: () => void;
+  catalog: CatalogTool[];
+  connectionId?: string;
 }) {
   const qc = useQueryClient();
   const [form] = Form.useForm();
   const [customApis, setCustomApis] = useState<CustomApi[]>([]);
+  const [builtinTools, setBuiltinTools] = useState<string[]>([]);
+  const [filter, setFilter] = useState<ContactFilter>(EMPTY_FILTER);
+  const [prompt, setPrompt] = useState('');
   const isEdit = !!agent;
 
   useEffect(() => {
     if (!open) return;
     if (agent) {
-      // Populate from cached list data immediately, then fetch full agent for systemPrompt
       form.setFieldsValue({
         name: agent.name,
         assistantName: agent.assistantName,
-        tools: agent.tools,
-        model: agent.model ?? 'google/gemini-2.5-flash-lite',
-        temperature: agent.temperature ?? 0.7,
-        maxIter: agent.maxIter ?? 8,
         respondToMentions: agent.groupConfig?.respondToMentions ?? true,
         respondToReplies: agent.groupConfig?.respondToReplies ?? true,
         respondToAll: agent.groupConfig?.respondToAll ?? false,
       });
-      setCustomApis(agent.customApis ?? []);
-      // Fetch full agent to load systemPrompt (excluded from list endpoint)
+      setBuiltinTools(agent.builtinTools ?? []);
+      setFilter(agent.contactFilter ?? EMPTY_FILTER);
       api.getAgent(agent._id).then(full => {
         form.setFieldsValue({ systemPrompt: full.systemPrompt });
+        setPrompt(full.systemPrompt ?? '');
         setCustomApis(full.customApis ?? []);
-      }).catch(() => { /* silently ignore — user can re-enter if fetch fails */ });
+        setBuiltinTools(full.builtinTools ?? []);
+        setFilter(full.contactFilter ?? EMPTY_FILTER);
+      }).catch(() => { /* ignore */ });
     } else {
       form.resetFields();
-      form.setFieldsValue({ model: 'google/gemini-2.5-flash-lite', temperature: 0.7, maxIter: 8, tools: ['evolution', 'chatwoot'], respondToMentions: true, respondToReplies: true, respondToAll: false });
-      setCustomApis([]);
+      form.setFieldsValue({ respondToMentions: true, respondToReplies: true, respondToAll: false });
+      setCustomApis([]); setBuiltinTools([]); setFilter(EMPTY_FILTER); setPrompt('');
     }
   }, [open, agent, form]);
-
-  const create = useMutation({
-    mutationFn: (vals: Record<string, unknown>) => api.createAgent(buildPayload(vals)),
-    onSuccess: ({ agent: created }) => {
-      qc.invalidateQueries({ queryKey: ['agents'] });
-      message.success(`Agente "${created.name}" criado! Conecte o WhatsApp.`);
-      onClose();
-    },
-    onError: (e: Error) => message.error(e.message),
-  });
-
-  const update = useMutation({
-    mutationFn: (vals: Record<string, unknown>) => api.updateAgent(agent!._id, buildPayload(vals)),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['agents'] }); message.success('Agente atualizado!'); onClose(); },
-    onError: (e: Error) => message.error(e.message),
-  });
 
   function buildPayload(vals: Record<string, unknown>) {
     return {
       name: vals.name as string,
       assistantName: vals.assistantName as string,
       systemPrompt: vals.systemPrompt as string,
-      tools: vals.tools as string[],
+      tools: ['evolution', 'chatwoot'], // base capabilities, hidden from the client
+      builtinTools,
       customApis,
-      model: vals.model as string,
-      temperature: Number(vals.temperature),
-      maxIter: Number(vals.maxIter),
+      contactFilter: filter,
+      connectionId,
       groupConfig: {
         respondToMentions: vals.respondToMentions as boolean,
         respondToReplies: vals.respondToReplies as boolean,
@@ -279,14 +237,26 @@ function AgentModal({ agent, open, onClose }: {
     };
   }
 
-  const submit = () => {
-    form.validateFields().then(vals => {
-      if (isEdit) update.mutate(vals as Record<string, unknown>);
-      else create.mutate(vals as Record<string, unknown>);
-    });
-  };
+  const create = useMutation({
+    mutationFn: (vals: Record<string, unknown>) => api.createAgent(buildPayload(vals)),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['agents'] }); message.success('Agente criado!'); onClose(); },
+    onError: (e: Error) => message.error(e.message),
+  });
+  const update = useMutation({
+    mutationFn: (vals: Record<string, unknown>) => api.updateAgent(agent!._id, buildPayload(vals)),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['agents'] }); message.success('Agente atualizado!'); onClose(); },
+    onError: (e: Error) => message.error(e.message),
+  });
 
-  const loading = create.isPending || update.isPending;
+  const submit = () => form.validateFields().then(vals => {
+    if (isEdit) update.mutate(vals as Record<string, unknown>);
+    else create.mutate(vals as Record<string, unknown>);
+  });
+
+  const toolNames = [
+    ...customApis.map(a => a.name),
+    ...catalog.filter(c => builtinTools.includes(c.id)).map(c => c.label),
+  ];
 
   return (
     <Modal
@@ -294,9 +264,9 @@ function AgentModal({ agent, open, onClose }: {
       open={open}
       onCancel={onClose}
       onOk={submit}
-      confirmLoading={loading}
+      confirmLoading={create.isPending || update.isPending}
       okText={isEdit ? 'Salvar' : 'Criar agente'}
-      width={660}
+      width={680}
       destroyOnClose
     >
       <Form form={form} layout="vertical" style={{ marginTop: 12 }}>
@@ -306,28 +276,59 @@ function AgentModal({ agent, open, onClose }: {
             label: <span><RobotOutlined /> Identidade</span>,
             children: (
               <>
-                <Form.Item name="name" label="Nome interno do agente" rules={[{ required: true }]}>
-                  <Input placeholder="Agente Vendas" />
+                <Form.Item name="name" label="Nome do agente (para você)" rules={[{ required: true }]}>
+                  <Input placeholder="Atendimento Vendas" />
                 </Form.Item>
-                <Form.Item name="assistantName" label="Nome apresentado ao cliente">
+                <Form.Item name="assistantName" label="Como o agente se apresenta ao cliente">
                   <Input placeholder="Sofia" />
                 </Form.Item>
-                <Form.Item name="systemPrompt" label="Instruções (System Prompt)">
-                  <TextArea rows={8} placeholder="Você é Sofia, assistente virtual da empresa…" style={{ fontFamily: 'monospace', fontSize: 13 }} />
+                <Form.Item name="systemPrompt" label="Instruções do agente" rules={[{ required: true }]}
+                  extra="Descreva a personalidade, o que ele deve fazer e quando usar cada ferramenta.">
+                  <TextArea rows={8} placeholder="Você é a Sofia, atendente da empresa…" onChange={e => setPrompt(e.target.value)} />
                 </Form.Item>
+                <PromptToolMask prompt={prompt} toolNames={toolNames} />
               </>
             ),
           },
           {
             key: 'tools',
-            label: <span><ApiOutlined /> Ferramentas</span>,
+            label: <span><ToolOutlined /> Ações</span>,
+            children: <ToolCatalog value={builtinTools} onChange={setBuiltinTools} catalog={catalog} />,
+          },
+          {
+            key: 'integrations',
+            label: <span><ApiOutlined /> Integrações</span>,
+            children: <CustomApiEditor apis={customApis} onChange={setCustomApis} />,
+          },
+          {
+            key: 'filter',
+            label: <span><FilterOutlined /> Quem ele atende</span>,
             children: (
               <>
-                <Form.Item name="tools" label="Ferramentas built-in habilitadas">
-                  <Select mode="multiple" options={BUILTIN_TOOLS} placeholder="Selecione as ferramentas" />
+                <Paragraph type="secondary" style={{ fontSize: 13 }}>
+                  Por padrão o agente responde a todos. Use a lista para restringir — ótimo quando vários agentes
+                  dividem o mesmo WhatsApp (ex.: um só para o grupo dos entregadores).
+                </Paragraph>
+                <Form.Item label="Modo">
+                  <Select
+                    value={filter.mode}
+                    onChange={mode => setFilter({ ...filter, mode })}
+                    options={[
+                      { value: 'blacklist', label: 'Responder a todos, EXCETO os bloqueados' },
+                      { value: 'whitelist', label: 'Responder SOMENTE aos permitidos' },
+                    ]}
+                  />
                 </Form.Item>
-                <Divider orientation="left">APIs customizadas</Divider>
-                <CustomApiEditor apis={customApis} onChange={setCustomApis} />
+                <Form.Item label={filter.mode === 'whitelist' ? 'Números permitidos' : 'Números bloqueados'}
+                  extra="Digite o número com DDI/DDD (ex.: 5511999998888) e tecle Enter.">
+                  <Select mode="tags" value={filter.contacts} onChange={contacts => setFilter({ ...filter, contacts })}
+                    placeholder="5511999998888" tokenSeparators={[',', ' ']} open={false} />
+                </Form.Item>
+                <Form.Item label={filter.mode === 'whitelist' ? 'Grupos permitidos' : 'Grupos bloqueados'}
+                  extra="Cole o ID do grupo (termina com @g.us) e tecle Enter.">
+                  <Select mode="tags" value={filter.groups} onChange={groups => setFilter({ ...filter, groups })}
+                    placeholder="1203...@g.us" tokenSeparators={[',', ' ']} open={false} />
+                </Form.Item>
               </>
             ),
           },
@@ -337,35 +338,14 @@ function AgentModal({ agent, open, onClose }: {
             children: (
               <>
                 <Alert type="info" showIcon message="Em grupos, o agente só responde se os critérios abaixo forem atendidos." style={{ marginBottom: 16 }} />
-                <Form.Item name="respondToMentions" label="Responder quando mencionado (@agente)" valuePropName="checked">
+                <Form.Item name="respondToMentions" label="Responder quando mencionado (@)" valuePropName="checked">
                   <Switch />
                 </Form.Item>
-                <Form.Item name="respondToReplies" label="Responder quando respondem a uma mensagem do agente" valuePropName="checked">
+                <Form.Item name="respondToReplies" label="Responder quando respondem a uma mensagem dele" valuePropName="checked">
                   <Switch />
                 </Form.Item>
-                <Form.Item name="respondToAll" label="Responder a todas as mensagens do grupo (ignora filtros acima)" valuePropName="checked">
+                <Form.Item name="respondToAll" label="Responder a todas as mensagens do grupo" valuePropName="checked">
                   <Switch />
-                </Form.Item>
-              </>
-            ),
-          },
-          {
-            key: 'advanced',
-            label: <span><SaveOutlined /> Avançado</span>,
-            children: (
-              <>
-                <Form.Item name="model" label="Modelo de IA">
-                  <AutoComplete
-                    options={POPULAR_MODELS}
-                    filterOption={(input, option) => (option?.value ?? '').toLowerCase().includes(input.toLowerCase())}
-                    placeholder="google/gemini-2.5-flash-lite"
-                  />
-                </Form.Item>
-                <Form.Item name="temperature" label="Temperature (0.0 – 1.0)">
-                  <Input type="number" min={0} max={1} step={0.1} />
-                </Form.Item>
-                <Form.Item name="maxIter" label="Máximo de iterações (tool calls)">
-                  <Input type="number" min={1} max={20} />
                 </Form.Item>
               </>
             ),
@@ -379,37 +359,44 @@ function AgentModal({ agent, open, onClose }: {
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function Agents() {
+  const nav = useNavigate();
   const { data: agents = [], isLoading } = useQuery({ queryKey: ['agents'], queryFn: api.getAgents, refetchInterval: 15_000 });
+  const { data: connections = [] } = useQuery({ queryKey: ['connections'], queryFn: api.getConnections });
+  const { data: catalog = [] } = useQuery({ queryKey: ['tool-catalog'], queryFn: api.getToolCatalog });
   const qc = useQueryClient();
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editAgent, setEditAgent] = useState<Agent | null>(null);
-  const [qrAgent, setQrAgent] = useState<Agent | null>(null);
+  const [pickOpen, setPickOpen] = useState(false);
+  const [chosenConnection, setChosenConnection] = useState<string | undefined>(undefined);
 
   const deleteAgent = useMutation({
     mutationFn: (id: string) => api.deleteAgent(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['agents'] }); message.success('Agente removido.'); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['agents'] }); qc.invalidateQueries({ queryKey: ['connections'] }); message.success('Agente removido.'); },
     onError: (e: Error) => message.error(e.message),
   });
 
-  const openCreate = () => { setEditAgent(null); setModalOpen(true); };
-  const openEdit = (a: Agent) => { setEditAgent(a); setModalOpen(true); };
+  const connName = (id?: string) => connections.find(c => c._id === id)?.name ?? '—';
+
+  const startCreate = () => {
+    if (connections.length === 0) { message.info('Conecte um WhatsApp primeiro.'); nav('/connections'); return; }
+    if (connections.length === 1) { setChosenConnection(connections[0]._id); setEditAgent(null); setModalOpen(true); }
+    else { setChosenConnection(undefined); setPickOpen(true); }
+  };
+  const openEdit = (a: Agent) => { setChosenConnection(a.connectionId); setEditAgent(a); setModalOpen(true); };
 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <Title level={3} style={{ margin: 0 }}><RobotOutlined /> Agentes</Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>Novo agente</Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={startCreate}>Novo agente</Button>
       </div>
 
       {agents.length === 0 && !isLoading && (
         <Card>
-          <div style={{ textAlign: 'center', padding: 40 }}>
-            <RobotOutlined style={{ fontSize: 48, color: '#d9d9d9', marginBottom: 16 }} />
-            <Title level={4} type="secondary">Nenhum agente criado</Title>
-            <Paragraph type="secondary">Crie seu primeiro agente para começar a receber mensagens no WhatsApp.</Paragraph>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>Criar agente</Button>
-          </div>
+          <Empty description="Nenhum agente ainda">
+            <Button type="primary" icon={<PlusOutlined />} onClick={startCreate}>Criar agente</Button>
+          </Empty>
         </Card>
       )}
 
@@ -417,69 +404,59 @@ export default function Agents() {
         {agents.map(agent => {
           const sb = statusBadge(agent.status);
           return (
-            <Card
-              key={agent._id}
-              styles={{ body: { padding: '16px 24px' } }}
-            >
+            <Card key={agent._id} styles={{ body: { padding: '16px 24px' } }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
                 <div style={{ flex: 1, minWidth: 200 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <Text strong style={{ fontSize: 16 }}>{agent.name}</Text>
                     {agent.assistantName && <Text type="secondary" style={{ fontSize: 13 }}>({agent.assistantName})</Text>}
                   </div>
-                  <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap', alignItems: 'center' }}>
                     <Badge status={sb.color} text={sb.label} />
-                    {agent.evolutionInstance && (
-                      <Text type="secondary" code style={{ fontSize: 11 }}>{agent.evolutionInstance}</Text>
-                    )}
-                    {agent.model && <Tag style={{ fontSize: 11 }}>{agent.model}</Tag>}
+                    <Tag icon={<WhatsAppOutlined />} color="green" style={{ fontSize: 11 }}>{connName(agent.connectionId)}</Tag>
+                    {agent.contactFilter?.mode === 'whitelist' && <Tag color="blue" style={{ fontSize: 11 }}>Atende lista específica</Tag>}
                   </div>
                 </div>
                 <Space wrap>
-                  {agent.status === 'pending_qr' && (
-                    <Button type="primary" icon={<QrcodeOutlined />} onClick={() => setQrAgent(agent)}>
-                      Conectar WhatsApp
-                    </Button>
-                  )}
-                  {agent.status === 'active' && (
-                    <Button icon={<QrcodeOutlined />} onClick={() => setQrAgent(agent)}>
-                      QR Code
-                    </Button>
-                  )}
                   <Button icon={<EditOutlined />} onClick={() => openEdit(agent)}>Editar</Button>
                   <Popconfirm
                     title={`Remover agente "${agent.name}"?`}
-                    description="Isso desconecta o WhatsApp, remove o inbox do Chatwoot e apaga a base de conhecimento."
+                    description="Remove o agente e sua base de conhecimento. O WhatsApp continua, se outros agentes usarem."
                     onConfirm={() => deleteAgent.mutate(agent._id)}
-                    okText="Remover"
-                    okButtonProps={{ danger: true }}
+                    okText="Remover" okButtonProps={{ danger: true }}
                   >
                     <Button danger icon={<DeleteOutlined />}>Remover</Button>
                   </Popconfirm>
                 </Space>
               </div>
-
-              {agent.systemPrompt && (
-                <Collapse ghost style={{ marginTop: 8 }} items={[{
-                  key: 'prompt',
-                  label: <Text type="secondary" style={{ fontSize: 12 }}>Ver system prompt</Text>,
-                  children: <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap', margin: 0, color: '#555' }}>{agent.systemPrompt}</pre>,
-                }]} />
-              )}
             </Card>
           );
         })}
       </Space>
 
-      <AgentModal open={modalOpen} agent={editAgent} onClose={() => setModalOpen(false)} />
-      {qrAgent && (
-        <QrModal
-          agentId={qrAgent._id}
-          agentName={qrAgent.name}
-          open={!!qrAgent}
-          onClose={() => setQrAgent(null)}
+      <AgentModal open={modalOpen} agent={editAgent} connectionId={chosenConnection} catalog={catalog} onClose={() => setModalOpen(false)} />
+
+      {/* Pick a WhatsApp when more than one exists */}
+      <Modal
+        title="Em qual WhatsApp este agente vai atender?"
+        open={pickOpen}
+        onCancel={() => setPickOpen(false)}
+        okText="Continuar"
+        okButtonProps={{ disabled: !chosenConnection }}
+        onOk={() => { setPickOpen(false); setEditAgent(null); setModalOpen(true); }}
+      >
+        <Select
+          style={{ width: '100%', marginTop: 8 }}
+          placeholder="Escolha o WhatsApp"
+          value={chosenConnection}
+          onChange={setChosenConnection}
+          options={connections.map(c => ({ value: c._id, label: c.name }))}
         />
-      )}
+        <Divider />
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          Vários agentes podem dividir o mesmo WhatsApp — use "Quem ele atende" para separar (ex.: um por grupo).
+        </Text>
+      </Modal>
     </div>
   );
 }

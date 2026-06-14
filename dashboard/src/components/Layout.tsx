@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { Layout as AntLayout, Menu, Button, Typography, Avatar, Dropdown } from 'antd';
+import { Layout as AntLayout, Menu, Button, Typography, Avatar, Dropdown, Alert, message, Space } from 'antd';
 import {
   RobotOutlined, BookOutlined, CalendarOutlined, MessageOutlined,
   SettingOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined,
-  UserOutlined, CommentOutlined,
+  UserOutlined, CommentOutlined, WhatsAppOutlined, InboxOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
@@ -16,14 +16,6 @@ const { Text } = Typography;
 const BRAND_BG = '#031a18';
 const BRAND_PRIMARY = '#0d9488';
 
-const menuItems = [
-  { key: '/agents', icon: <RobotOutlined />, label: 'Agentes' },
-  { key: '/knowledge', icon: <BookOutlined />, label: 'Base de conhecimento' },
-  { key: '/scheduled-posts', icon: <CalendarOutlined />, label: 'Postagens agendadas' },
-  { key: '/conversations', icon: <MessageOutlined />, label: 'Conversas' },
-  { key: '/settings', icon: <SettingOutlined />, label: 'Configurações' },
-];
-
 export default function Layout({ children }: { children: React.ReactNode }) {
   const nav = useNavigate();
   const loc = useLocation();
@@ -31,6 +23,28 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
 
   const { data: me } = useQuery({ queryKey: ['me'], queryFn: api.getMe });
+  const { data: connections = [] } = useQuery({ queryKey: ['connections'], queryFn: api.getConnections });
+
+  // Gate: until the negócio has at least one WhatsApp connected, the rest is locked.
+  const configured = connections.length > 0;
+
+  const menuItems = [
+    { key: '/connections', icon: <WhatsAppOutlined />, label: 'WhatsApp' },
+    { key: '/agents', icon: <RobotOutlined />, label: 'Agentes', disabled: !configured },
+    { key: '/knowledge', icon: <BookOutlined />, label: 'Conhecimento', disabled: !configured },
+    { key: '/scheduled-posts', icon: <CalendarOutlined />, label: 'Postagens agendadas', disabled: !configured },
+    { key: '/conversations', icon: <MessageOutlined />, label: 'Conversas', disabled: !configured },
+    { key: '/settings', icon: <SettingOutlined />, label: 'Configurações' },
+  ];
+
+  const openCrm = async () => {
+    try {
+      const { url } = await api.getCrmLink();
+      window.open(url, '_blank', 'noopener');
+    } catch {
+      message.error('Não foi possível abrir a Central de Conversas agora. Tente novamente.');
+    }
+  };
 
   const userMenu = {
     items: [
@@ -96,6 +110,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
             onClick={() => setCollapsed(!collapsed)}
           />
+          <Space>
+          <Button icon={<InboxOutlined />} onClick={openCrm}>Central de Conversas</Button>
           <Dropdown menu={userMenu} placement="bottomRight">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '4px 8px', borderRadius: 8, transition: 'background 0.2s' }}
               onMouseEnter={e => (e.currentTarget.style.background = '#f5f5f5')}
@@ -105,9 +121,20 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <Text style={{ fontSize: 13 }}>{me?.email ?? '…'}</Text>
             </div>
           </Dropdown>
+          </Space>
         </Header>
 
         <Content style={{ margin: 24, background: '#f5f5f5', borderRadius: 8, padding: 24, minHeight: 360 }}>
+          {!configured && loc.pathname !== '/connections' && loc.pathname !== '/settings' && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="Configure seu negócio para começar"
+              description="Conecte um WhatsApp para liberar os agentes, o conhecimento e as conversas."
+              action={<Button type="primary" size="small" onClick={() => nav('/connections')}>Conectar WhatsApp</Button>}
+            />
+          )}
           {children}
         </Content>
       </AntLayout>

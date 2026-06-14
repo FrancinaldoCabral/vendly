@@ -39,6 +39,11 @@ export interface ProvisionAgentInput {
   systemPrompt: string;
   model?: string;
   tools?: string[];
+  builtinTools?: string[];
+  assistantName?: string;
+  customApis?: unknown[];
+  groupConfig?: { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean };
+  contactFilter?: { mode: 'blacklist' | 'whitelist'; contacts: string[]; groups: string[] };
   /** Attach to an existing WhatsApp connection. If omitted, a new one is created (1:1 legacy). */
   connectionId?: string;
 }
@@ -64,6 +69,7 @@ export interface AgentDoc {
   tenantId: string;
   connectionId: string;           // which WhatsApp connection this agent listens on
   name: string;
+  assistantName?: string;
   evolutionInstance: string;      // denormalized from the connection (keeps message flow simple)
   chatwootInboxId?: number;       // denormalized from the connection
   systemPrompt: string;
@@ -364,15 +370,16 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentD
     tenantId: input.tenantId,
     connectionId: connection._id,
     name: input.name,
+    assistantName: input.assistantName,
     evolutionInstance: connection.evolutionInstance,
     chatwootInboxId: connection.chatwootInboxId,
     systemPrompt: input.systemPrompt,
     model: input.model ?? config.openrouter.chatModel,
     tools: input.tools ?? ['evolution', 'chatwoot'],
-    builtinTools: [],
-    customApis: [],
-    groupConfig: { respondToMentions: true, respondToReplies: true, respondToAll: false },
-    contactFilter: { mode: 'blacklist', contacts: [], groups: [] }, // default: empty blacklist → everyone passes
+    builtinTools: input.builtinTools ?? [],
+    customApis: input.customApis ?? [],
+    groupConfig: input.groupConfig ?? { respondToMentions: true, respondToReplies: true, respondToAll: false },
+    contactFilter: input.contactFilter ?? { mode: 'blacklist', contacts: [], groups: [] }, // default: empty blacklist → everyone passes
     priority: siblings, // appended after existing agents
     status: connection.status, // shares the connection's connection-state
     createdAt: new Date(),
