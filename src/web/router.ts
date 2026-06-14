@@ -2,13 +2,13 @@ import { Router } from 'express';
 import jwt from 'jsonwebtoken';
 import { requireAuth, requireAdmin, signTenantToken } from './auth.js';
 import { config } from '../config.js';
-import { checkWcSubscription, findOrCreateTenant, sendMagicLink } from '../services/provisioning.js';
+import { checkWcSubscription, findOrCreateTenant, sendMagicLink, reprovisionAgent, getChatwootSsoUrl } from '../services/provisioning.js';
 import { tenantsRouter } from './routes/tenants.js';
 import { agentsRouter } from './routes/agents.js';
 import { knowledgeRouter } from './routes/knowledge.js';
 import { scheduledPostsRouter } from './routes/scheduled_posts.js';
 import { conversationsRouter } from './routes/conversations.js';
-import { getClient } from '../tools/mongodb.js';
+import { getClient, getDb } from '../tools/mongodb.js';
 import { getRedis } from '../tools/redis.js';
 
 export const apiRouter = Router();
@@ -169,6 +169,90 @@ apiRouter.post('/admin/diag-chatwoot', requireAuth, requireAdmin, async (_req, r
   }
 
   res.json(steps);
+});
+
+// ── Admin: full state diagnostic for a tenant ─────────────────────────────────
+apiRouter.get('/admin/tenant-state', requireAuth, requireAdmin, async (req, res) => {
+  const email = req.query.email as string | undefined;
+  if (!email) { res.status(400).json({ error: 'email query param required' }); return; }
+
+  try {
+    const db = await getDb();
+    const tenant = await db.collection('tenants').findOne({ email });
+    if (!tenant) { res.status(404).json({ error: 'Tenant not found' }); return; }
+
+    const agents = await db.collection('agents').find({ tenantId: tenant._id }).toArray();
+    const result: Record<string, unknown> = { tenant, agents };
+
+    // Generate fresh Chatwoot SSO URL
+    if (tenant.chatwoot?.accountId) {
+      const ssoUrl = await getChatwootSsoUrl(String(tenant._id), tenant.chatwoot.accountId, tenant.chatwoot.userId);
+      result.chatwoot_sso = ssoUrl ?? 'failed to generate';
+    }
+
+    // List Chatwoot inboxes + webhooks for tenant's account
+    if (tenant.chatwoot?.accountId && tenant.chatwoot?.apiKey) {
+      const cwUrl = (process.env.CHATWOOT_URL ?? '').replace(/\/$/, '');
+      const cwHeaders = { 'api_access_token': tenant.chatwoot.apiKey };
+      try {
+        const [inboxRes, webhookRes] = await Promise.all([
+          fetch(`${cwUrl}/api/v1/accounts/${tenant.chatwoot.accountId}/inboxes`, { headers: cwHeaders }),
+          fetch(`${cwUrl}/api/v1/accounts/${tenant.chatwoot.accountId}/webhooks`, { headers: cwHeaders }),
+        ]);
+        if (inboxRes.ok) {
+          const { payload: inboxes } = await inboxRes.json() as { payload: unknown[] };
+          result.chatwoot_inboxes = inboxes;
+        } else {
+          result.chatwoot_inboxes_error = inboxRes.status;
+        }
+        if (webhookRes.ok) {
+          const { payload: webhooks } = await webhookRes.json() as { payload: unknown[] };
+          result.chatwoot_webhooks = webhooks;
+        } else {
+          result.chatwoot_webhooks_error = webhookRes.status;
+        }
+      } catch (e) { result.chatwoot_api_error = String(e); }
+    }
+
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Admin: repair an agent's Evolution webhook + Chatwoot inbox ───────────────
+apiRouter.post('/admin/fix-agent', requireAuth, requireAdmin, async (req, res) => {
+  const { agentId, tenantId } = req.body as { agentId?: string; tenantId?: string };
+
+  if (!agentId && !tenantId) {
+    res.status(400).json({ error: 'agentId or tenantId required' });
+    return;
+  }
+
+  try {
+    const db = await getDb();
+    const agentIds: string[] = [];
+
+    if (agentId) {
+      agentIds.push(agentId);
+    } else {
+      // Repair all agents for tenant
+      const agents = await db.collection('agents').find({ tenantId }).toArray();
+      agentIds.push(...agents.map(a => String(a._id)));
+    }
+
+    if (agentIds.length === 0) {
+      res.status(404).json({ error: 'No agents found' });
+      return;
+    }
+
+    const allResults: Record<string, unknown> = {};
+    for (const id of agentIds) {
+      allResults[id] = await reprovisionAgent(id);
+    }
+
+    res.json({ ok: true, repaired: agentIds.length, results: allResults });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
 });
 
 // ── Admin: reset all tenant data (no JWT needed — admin key only) ─────────────

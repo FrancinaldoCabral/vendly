@@ -3,7 +3,7 @@
  */
 import { Router } from 'express';
 import { getDb } from '../../tools/mongodb.js';
-import { findOrCreateTenant, sendWelcomeEmailWithChatwoot, type TenantDoc } from '../../services/provisioning.js';
+import { findOrCreateTenant, sendWelcomeEmailWithChatwoot, getChatwootSsoUrl, type TenantDoc } from '../../services/provisioning.js';
 import { requireAdmin } from '../auth.js';
 
 export const tenantsRouter = Router();
@@ -78,5 +78,32 @@ tenantsRouter.get('/me', async (req, res) => {
     const tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: req.auth!.tenantId });
     if (!tenant) { res.status(404).json({ error: 'Tenant not found' }); return; }
     res.json(tenant);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// GET /api/tenants/me/chatwoot-sso — generate fresh Chatwoot SSO login URL
+tenantsRouter.get('/me/chatwoot-sso', async (req, res) => {
+  try {
+    const db = await getDb();
+    const tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: req.auth!.tenantId });
+    if (!tenant) { res.status(404).json({ error: 'Tenant not found' }); return; }
+    if (!tenant.chatwoot?.accountId) {
+      res.status(404).json({ error: 'Conta Chatwoot não configurada para este tenant' });
+      return;
+    }
+
+    const ssoUrl = await getChatwootSsoUrl(tenant._id, tenant.chatwoot.accountId, tenant.chatwoot.userId);
+    if (!ssoUrl) {
+      res.status(500).json({ error: 'Falha ao gerar link de acesso ao CRM. Tente novamente.' });
+      return;
+    }
+
+    // Update stored SSO URL for future reference
+    await db.collection<TenantDoc>('tenants').updateOne(
+      { _id: tenant._id },
+      { $set: { 'chatwoot.ssoUrl': ssoUrl } },
+    );
+
+    res.json({ url: ssoUrl });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });

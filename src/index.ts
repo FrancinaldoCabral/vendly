@@ -23,9 +23,9 @@ import { coolifyTools, handleCoolifyTool } from './tools/coolify.js';
 import { intelligenceTools, handleIntelligenceTool } from './tools/intelligence.js';
 import { systemTools, handleSystemTool } from './tools/system.js';
 
-import { registerWebhookRoute } from './services/webhook.js';
+import { registerWebhookRoute, handleEvolutionMessageWebhook } from './services/webhook.js';
 import { startScheduler } from './services/scheduler.js';
-import { provisionTenant, provisionAgent } from './services/provisioning.js';
+import { provisionTenant, provisionAgent, reprovisionEvolutionWebhook } from './services/provisioning.js';
 import { getDb } from './tools/mongodb.js';
 import { apiRouter } from './web/router.js';
 import { config } from './config.js';
@@ -107,6 +107,31 @@ function readBody(req: import('node:http').IncomingMessage): Promise<string> {
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 
+/** On startup, ensure all existing Evolution instances have MESSAGES_UPSERT in their webhook. */
+async function upgradeEvolutionWebhooks(): Promise<void> {
+  try {
+    const db = await getDb();
+    const agents = await db.collection('agents').find(
+      {}, { projection: { evolutionInstance: 1 } }
+    ).toArray() as Array<{ evolutionInstance?: string }>;
+
+    if (agents.length === 0) return;
+    console.log(`[startup] Upgrading Evolution webhooks for ${agents.length} agent(s)`);
+
+    for (const agent of agents) {
+      if (!agent.evolutionInstance) continue;
+      try {
+        await reprovisionEvolutionWebhook(agent.evolutionInstance);
+      } catch (e) {
+        console.warn(`[startup] webhook upgrade failed for ${agent.evolutionInstance}:`, String(e));
+      }
+    }
+    console.log('[startup] Evolution webhook upgrade complete');
+  } catch (e) {
+    console.error('[startup] upgradeEvolutionWebhooks failed:', String(e));
+  }
+}
+
 async function main() {
   const port = config.app.port;
 
@@ -159,7 +184,7 @@ async function main() {
     }
   });
 
-  // ── Evolution webhook (connection updates per-instance) ───────────────────
+  // ── Evolution webhook (connection updates + direct message delivery) ────────
   webApp.post('/webhook/evolution/:instance', async (req, res) => {
     res.status(200).json({ ok: true });
 
@@ -169,32 +194,41 @@ async function main() {
 
     console.log(`[evolution-webhook] instance=${instance} event=${event}`);
 
-    if (event !== 'connection_update') return;
+    if (event === 'connection_update') {
+      // Normalize state across Evolution payload variants
+      const data = (body.data ?? {}) as Record<string, unknown>;
+      const innerInst = (data.instance ?? {}) as Record<string, unknown>;
+      const state = String(innerInst.state ?? data.state ?? data.connectionStatus ?? '');
 
-    // Normalize state across Evolution payload variants
-    const data = (body.data ?? {}) as Record<string, unknown>;
-    const innerInst = (data.instance ?? {}) as Record<string, unknown>;
-    const state = String(innerInst.state ?? data.state ?? data.connectionStatus ?? '');
+      if (state !== 'open') {
+        console.log(`[evolution-webhook] ${instance}: state=${state} — ignoring`);
+        return;
+      }
 
-    if (state !== 'open') {
-      console.log(`[evolution-webhook] ${instance}: state=${state} — ignoring`);
+      try {
+        const db = await getDb();
+        const result = await db.collection('agents').findOneAndUpdate(
+          { evolutionInstance: instance, status: 'pending_qr' },
+          { $set: { status: 'active', updatedAt: new Date() } },
+          { returnDocument: 'after' },
+        );
+        if (result) {
+          console.log(`[evolution-webhook] Agent activated: agentId=${result._id} instance=${instance}`);
+        } else {
+          console.log(`[evolution-webhook] No pending_qr agent found for instance=${instance}`);
+        }
+      } catch (e) {
+        console.error(`[evolution-webhook] DB update failed:`, String(e));
+      }
       return;
     }
 
-    try {
-      const db = await getDb();
-      const result = await db.collection('agents').findOneAndUpdate(
-        { evolutionInstance: instance, status: 'pending_qr' },
-        { $set: { status: 'active', updatedAt: new Date() } },
-        { returnDocument: 'after' },
-      );
-      if (result) {
-        console.log(`[evolution-webhook] Agent activated: agentId=${result._id} instance=${instance}`);
-      } else {
-        console.log(`[evolution-webhook] No pending_qr agent found for instance=${instance}`);
+    if (event === 'messages_upsert') {
+      try {
+        await handleEvolutionMessageWebhook(instance, body);
+      } catch (e) {
+        console.error(`[evolution-webhook] messages_upsert error instance=${instance}:`, String(e));
       }
-    } catch (e) {
-      console.error(`[evolution-webhook] DB update failed:`, String(e));
     }
   });
 
@@ -382,6 +416,8 @@ async function main() {
     } catch (e) {
       console.error('[scheduler] Failed to start:', String(e));
     }
+    // Upgrade all existing Evolution instances to include MESSAGES_UPSERT
+    setTimeout(() => upgradeEvolutionWebhooks().catch(e => console.error('[startup] webhook upgrade error:', String(e))), 5000);
   });
 }
 

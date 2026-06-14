@@ -26,8 +26,9 @@ export interface TenantDoc {
   createdAt: Date;
   chatwoot?: {
     accountId: number;
+    userId?: number;  // Chatwoot platform user ID (for SSO regeneration)
     apiKey: string;  // user's api_access_token for runtime Chatwoot API calls
-    ssoUrl: string;  // one-time SSO login link (regenerated on demand)
+    ssoUrl: string;  // last-known SSO login link (regenerated on demand via /me/chatwoot-sso)
   };
 }
 
@@ -125,9 +126,9 @@ export async function findOrCreateTenant(
       if (cwAccount) {
         await db.collection<TenantDoc>('tenants').updateOne(
           { _id: existing._id },
-          { $set: { chatwoot: { accountId: cwAccount.accountId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl } } },
+          { $set: { chatwoot: { accountId: cwAccount.accountId, userId: cwAccount.userId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl } } },
         );
-        existing.chatwoot = { accountId: cwAccount.accountId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl };
+        existing.chatwoot = { accountId: cwAccount.accountId, userId: cwAccount.userId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl };
         console.log(`[provisioning] Tenant ${existing._id} Chatwoot healed: accountId=${cwAccount.accountId}`);
       }
     }
@@ -151,7 +152,7 @@ export async function findOrCreateTenant(
     plan: 'starter',
     status: 'active',
     createdAt: new Date(),
-    chatwoot: { accountId: cwAccount.accountId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl },
+    chatwoot: { accountId: cwAccount.accountId, userId: cwAccount.userId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl },
   };
 
   await db.collection<TenantDoc>('tenants').insertOne(tenant);
@@ -390,8 +391,16 @@ async function createEvolutionInstance(instance: string, webhookUrl: string): Pr
     throw new Error(`Evolution instance create failed: ${r.status} ${txt.slice(0, 200)}`);
   }
 
-  // Register webhook so Evolution notifies us on CONNECTION_UPDATE
-  // Evolution v2.3+ requires the payload wrapped in a "webhook" key
+  // Register webhook — CONNECTION_UPDATE for QR/connect events, MESSAGES_UPSERT for direct message delivery
+  await setEvolutionWebhook(instance, webhookUrl, evUrl, headers);
+}
+
+async function setEvolutionWebhook(
+  instance: string,
+  webhookUrl: string,
+  evUrl: string,
+  headers: Record<string, string>,
+): Promise<void> {
   try {
     const wRes = await fetch(`${evUrl}/webhook/set/${instance}`, {
       method: 'POST',
@@ -402,7 +411,7 @@ async function createEvolutionInstance(instance: string, webhookUrl: string): Pr
           enabled: true,
           webhookBase64: false,
           webhookByEvents: false,
-          events: ['CONNECTION_UPDATE', 'QRCODE_UPDATED'],
+          events: ['CONNECTION_UPDATE', 'QRCODE_UPDATED', 'MESSAGES_UPSERT'],
         },
       }),
     });
@@ -411,6 +420,14 @@ async function createEvolutionInstance(instance: string, webhookUrl: string): Pr
   } catch (e) {
     console.warn(`[provisioning] Evolution webhook set failed (non-fatal):`, String(e));
   }
+}
+
+/** Update webhook for an existing Evolution instance to include MESSAGES_UPSERT (safe to call repeatedly). */
+export async function reprovisionEvolutionWebhook(instance: string): Promise<void> {
+  const evUrl = config.evolution.url.replace(/\/$/, '');
+  const headers = { 'Content-Type': 'application/json', apikey: config.evolution.apiKey };
+  const webhookUrl = `${config.app.url}/webhook/evolution/${instance}`;
+  await setEvolutionWebhook(instance, webhookUrl, evUrl, headers);
 }
 
 // ── Chatwoot ─────────────────────────────────────────────────────────────────
@@ -422,7 +439,7 @@ export async function createChatwootAccount(
   tenantEmail: string,
   name: string,
   tenantId: string,
-): Promise<{ accountId: number; apiKey: string; ssoUrl: string } | null> {
+): Promise<{ accountId: number; userId: number; apiKey: string; ssoUrl: string } | null> {
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
   const platKey = config.chatwoot.platformKey;
   const platHeaders = { 'Content-Type': 'application/json', 'api_access_token': platKey };
@@ -463,28 +480,29 @@ export async function createChatwootAccount(
       console.error(`[provisioning] Chatwoot create user failed: ${r2.status} ${JSON.stringify(user)}`);
       return null;
     }
+    const userId = user.id;
     const apiKey = user.access_token ?? '';
-    console.log(`[provisioning] Chatwoot user created: id=${user.id} internalEmail=${internalEmail} tenantEmail=${tenantEmail}`);
+    console.log(`[provisioning] Chatwoot user created: id=${userId} internalEmail=${internalEmail} tenantEmail=${tenantEmail}`);
 
     // Step 3: add user to account as administrator
     const r3 = await fetch(`${cwUrl}/platform/api/v1/accounts/${accountId}/account_users`, {
       method: 'POST',
       headers: platHeaders,
-      body: JSON.stringify({ user_id: user.id, role: 'administrator' }),
+      body: JSON.stringify({ user_id: userId, role: 'administrator' }),
     });
     if (!r3.ok) {
       console.error(`[provisioning] Chatwoot add user to account failed: ${r3.status}`);
     }
 
     // Step 4: get SSO login link (no password needed — customer clicks link)
-    const r4 = await fetch(`${cwUrl}/platform/api/v1/users/${user.id}/login`, {
+    const r4 = await fetch(`${cwUrl}/platform/api/v1/users/${userId}/login`, {
       headers: platHeaders,
     });
     const sso = await r4.json() as { url?: string };
     const ssoUrl = sso.url ?? `${cwUrl}/app/login`;
-    console.log(`[provisioning] Chatwoot SSO link generated for user ${user.id}`);
+    console.log(`[provisioning] Chatwoot SSO link generated for user ${userId}`);
 
-    return { accountId, apiKey, ssoUrl };
+    return { accountId, userId, apiKey, ssoUrl };
   } catch (e) {
     console.error('[provisioning] Chatwoot account creation error:', String(e));
     return null;
@@ -578,6 +596,129 @@ async function registerChatwootWebhook(accountId: number, apiKey: string, webhoo
   } catch (e) {
     console.error('[provisioning] Chatwoot webhook register failed:', String(e));
   }
+}
+
+// ── Repair / reprovision ─────────────────────────────────────────────────────
+
+/** Generate a fresh Chatwoot SSO URL for a tenant. Falls back to listing platform users if userId not stored. */
+export async function getChatwootSsoUrl(tenantId: string, accountId: number, userId?: number): Promise<string | null> {
+  const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+  const platHeaders = { 'Content-Type': 'application/json', 'api_access_token': config.chatwoot.platformKey };
+
+  let uid = userId;
+
+  if (!uid) {
+    // Fallback: find user by internal email via Platform API
+    const internalEmail = `tenant-${tenantId}@accounts.vendly.chat`;
+    try {
+      const r = await fetch(`${cwUrl}/platform/api/v1/users?email=${encodeURIComponent(internalEmail)}`, { headers: platHeaders });
+      if (r.ok) {
+        const data = await r.json() as { payload?: Array<{ id: number; email: string }> } | Array<{ id: number; email: string }>;
+        const users = Array.isArray(data) ? data : (data as { payload?: Array<{ id: number; email: string }> }).payload ?? [];
+        const found = users.find((u: { id: number; email: string }) => u.email === internalEmail);
+        uid = found?.id;
+      }
+    } catch (e) {
+      console.error('[provisioning] SSO user lookup failed:', String(e));
+    }
+  }
+
+  if (!uid) return null;
+
+  try {
+    const r = await fetch(`${cwUrl}/platform/api/v1/users/${uid}/login`, { headers: platHeaders });
+    if (r.ok) {
+      const data = await r.json() as { url?: string };
+      return data.url ?? null;
+    }
+  } catch (e) {
+    console.error('[provisioning] SSO link generation failed:', String(e));
+  }
+  return null;
+}
+
+/** Re-provision an existing agent: update Evolution webhook, fix Chatwoot inbox + webhook. */
+export async function reprovisionAgent(agentId: string): Promise<{ ok: boolean; results: Record<string, string> }> {
+  const results: Record<string, string> = {};
+  const db = await getDb();
+
+  const agent = await db.collection<AgentDoc>('agents').findOne({ _id: agentId } as Record<string, unknown>);
+  if (!agent) return { ok: false, results: { error: 'Agent not found' } };
+
+  const tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: agent.tenantId });
+  if (!tenant?.chatwoot) return { ok: false, results: { error: 'Tenant has no Chatwoot account' } };
+
+  const { accountId: cwAccountId, apiKey: cwApiKey } = tenant.chatwoot;
+  const instance = agent.evolutionInstance;
+  const evUrl = config.evolution.url.replace(/\/$/, '');
+  const evHeaders = { 'Content-Type': 'application/json', apikey: config.evolution.apiKey };
+  const webhookUrl = `${config.app.url}/webhook/evolution/${instance}`;
+
+  // 1. Update Evolution webhook to include MESSAGES_UPSERT
+  try {
+    await setEvolutionWebhook(instance, webhookUrl, evUrl, evHeaders);
+    results.evolution_webhook = 'ok (MESSAGES_UPSERT enabled)';
+  } catch (e) { results.evolution_webhook = `error: ${String(e)}`; }
+
+  // 2. Fix Chatwoot inbox if missing
+  if (!agent.chatwootInboxId) {
+    const inboxId = await createChatwootInbox(instance, agent.name, agentId, cwAccountId, cwApiKey);
+    if (inboxId) {
+      await db.collection<AgentDoc>('agents').updateOne(
+        { _id: agentId } as Record<string, unknown>,
+        { $set: { chatwootInboxId: inboxId } },
+      );
+      results.chatwoot_inbox = `created inboxId=${inboxId}`;
+    } else {
+      results.chatwoot_inbox = 'failed to create/find inbox';
+    }
+  } else {
+    results.chatwoot_inbox = `already present inboxId=${agent.chatwootInboxId}`;
+  }
+
+  // 3. Ensure Chatwoot webhook is registered
+  const cwWebhookUrl = `${config.app.url}/webhook/chatwoot/${agentId}`;
+  const cwUrl2 = config.chatwoot.url.replace(/\/$/, '');
+  const cwHeaders = { 'Content-Type': 'application/json', 'api_access_token': cwApiKey };
+  try {
+    const listRes = await fetch(`${cwUrl2}/api/v1/accounts/${cwAccountId}/webhooks`, { headers: cwHeaders });
+    if (listRes.ok) {
+      const { payload: webhooks } = await listRes.json() as { payload: Array<{ id: number; url: string }> };
+      const existing = webhooks.find(w => w.url === cwWebhookUrl);
+      if (existing) {
+        results.chatwoot_webhook = `already registered id=${existing.id}`;
+      } else {
+        await registerChatwootWebhook(cwAccountId, cwApiKey, cwWebhookUrl);
+        results.chatwoot_webhook = 'registered';
+      }
+    } else {
+      await registerChatwootWebhook(cwAccountId, cwApiKey, cwWebhookUrl);
+      results.chatwoot_webhook = 'registered (list failed, registered anyway)';
+    }
+  } catch (e) { results.chatwoot_webhook = `error: ${String(e)}`; }
+
+  // 4. Re-run Chatwoot integration on Evolution (re-link instance to inbox)
+  try {
+    const cwSetRes = await fetch(`${evUrl}/chatwoot/set/${instance}`, {
+      method: 'POST',
+      headers: evHeaders,
+      body: JSON.stringify({
+        enabled: true,
+        accountId: cwAccountId,
+        token: cwApiKey,
+        url: config.chatwoot.url,
+        nameInbox: agent.name,
+        signMsg: false,
+        reopenConversation: true,
+        conversationPending: false,
+        autoCreate: true,
+      }),
+    });
+    const cwSetBody = await cwSetRes.text();
+    results.chatwoot_set = `status=${cwSetRes.status} body=${cwSetBody.slice(0, 200)}`;
+  } catch (e) { results.chatwoot_set = `error: ${String(e)}`; }
+
+  return { ok: true, results };
 }
 
 // ── Qdrant ───────────────────────────────────────────────────────────────────

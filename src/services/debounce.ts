@@ -82,7 +82,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   const sessionKey = `sessao:t:${tenantId}:${agentId}:${conversationId}`;
   const takeoverKey = `human_takeover:t:${tenantId}:${agentId}:${conversationId}`;
 
-  // Skip if human has taken over
+  // Initial takeover check using conversationId key (fast reject before reading buffer)
   const takeover = await redis.get(takeoverKey);
   if (takeover) {
     console.log(`[debounce] SKIP: human_takeover active agent=${agentId} conv=${conversationId}`);
@@ -137,6 +137,20 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     return;
   }
 
+  // Recompute keys using JID when available — unifies Evolution + Chatwoot paths
+  const jidKey = contactJid ? contactJid.replace(/[^a-z0-9]/gi, '_') : '';
+  const activeSessionKey = jidKey ? `sessao:t:${tenantId}:${agentId}:${jidKey}` : sessionKey;
+  const activeTakeoverKey = jidKey ? `human_takeover:t:${tenantId}:${agentId}:${jidKey}` : takeoverKey;
+
+  // Second takeover check using JID key (covers human takeover from Chatwoot path)
+  if (jidKey && activeTakeoverKey !== takeoverKey) {
+    const jidTakeover = await redis.get(activeTakeoverKey);
+    if (jidTakeover) {
+      console.log(`[debounce] SKIP: human_takeover active (jid) agent=${agentId} jid=${contactJid}`);
+      return;
+    }
+  }
+
   // Load agent config + tenant Chatwoot credentials
   const db = await getDb();
   const agentDoc = await db.collection<AgentDoc>('agents').findOne({ _id: agentId, tenantId })
@@ -169,8 +183,8 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     }
   }
 
-  // Load session history from Redis
-  const sessionRaw = await redis.get(sessionKey);
+  // Load session history from Redis (use JID-based key for unified history across both paths)
+  const sessionRaw = await redis.get(activeSessionKey);
   let history: OpenRouterMessage[] = [];
   if (sessionRaw) {
     try { history = JSON.parse(sessionRaw) as OpenRouterMessage[]; } catch { /**/ }
@@ -249,18 +263,22 @@ export async function processBuffer(agentId: string, conversationId: string, ten
       cwAccountId,
       cwApiKey,
     );
-    await redis.set(takeoverKey, '1', 'EX', 60 * 60 * 24); // 24h TTL
+    // Set takeover flag on both keys so both paths respect it
+    await redis.set(activeTakeoverKey, '1', 'EX', 60 * 60 * 24); // 24h TTL
+    if (activeTakeoverKey !== takeoverKey) {
+      await redis.set(takeoverKey, '1', 'EX', 60 * 60 * 24);
+    }
     console.log(`[debounce] ESCALATED agent=${agentId} conv=${conversationId}`);
   }
 
-  // Update session history
+  // Update session history (JID-based key for unified history)
   const newHistory: OpenRouterMessage[] = [
     ...history,
     { role: 'user', content: userContent },
     { role: 'assistant', content },
   ];
   const trimmed = trimHistory(newHistory, HISTORY_MAX);
-  await redis.set(sessionKey, JSON.stringify(trimmed), 'EX', 60 * 60 * 24 * 7); // 7 days
+  await redis.set(activeSessionKey, JSON.stringify(trimmed), 'EX', 60 * 60 * 24 * 7); // 7 days
 
   // Persist conversation record
   await db.collection('conversations').insertOne({
