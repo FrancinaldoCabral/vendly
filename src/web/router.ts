@@ -123,6 +123,54 @@ apiRouter.post('/auth/token', async (req, res) => {
   }
 });
 
+// ── Admin: diagnose Chatwoot Platform API from server ────────────────────────
+apiRouter.post('/admin/diag-chatwoot', requireAuth, requireAdmin, async (_req, res) => {
+  const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+  const platKey = config.chatwoot.platformKey;
+  const steps: Record<string, unknown> = { cwUrl, hasPlatKey: !!platKey };
+
+  // Step 1: create test account
+  try {
+    const r1 = await fetch(`${cwUrl}/platform/api/v1/accounts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'api_access_token': platKey },
+      body: JSON.stringify({ name: '__diag_test__' }),
+    });
+    const body1 = await r1.text();
+    steps.step1_status = r1.status;
+    steps.step1_body = body1.slice(0, 500);
+
+    if (r1.ok) {
+      const account = JSON.parse(body1) as { id?: number };
+      const accountId = account.id;
+      steps.step1_accountId = accountId;
+
+      // Step 2: create test user
+      const r2 = await fetch(`${cwUrl}/platform/api/v1/users`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api_access_token': platKey },
+        body: JSON.stringify({ name: 'DiagTest', email: `diag-${Date.now()}@test.vendly.chat`, password: 'Diag1234!', password_confirmation: 'Diag1234!' }),
+      });
+      const body2 = await r2.text();
+      steps.step2_status = r2.status;
+      steps.step2_body = body2.slice(0, 500);
+
+      // Cleanup: delete the test account
+      if (accountId) {
+        await fetch(`${cwUrl}/platform/api/v1/accounts/${accountId}`, {
+          method: 'DELETE',
+          headers: { 'api_access_token': platKey },
+        });
+        steps.cleanup = `deleted account ${accountId}`;
+      }
+    }
+  } catch (e) {
+    steps.error = String(e);
+  }
+
+  res.json(steps);
+});
+
 // ── Admin: reset all tenant data (no JWT needed — admin key only) ─────────────
 apiRouter.post('/admin/reset', requireAuth, requireAdmin, async (_req, res) => {
   try {
