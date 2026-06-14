@@ -3,7 +3,7 @@
  */
 import { Router } from 'express';
 import { getDb } from '../../tools/mongodb.js';
-import { provisionTenant, type TenantDoc } from '../../services/provisioning.js';
+import { findOrCreateTenant, sendWelcomeEmailWithChatwoot, type TenantDoc } from '../../services/provisioning.js';
 import { requireAdmin } from '../auth.js';
 
 export const tenantsRouter = Router();
@@ -23,13 +23,16 @@ tenantsRouter.get('/', async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// POST /api/tenants — admin: manually create tenant
+// POST /api/tenants — admin: manually create tenant + Chatwoot account + send welcome email
 tenantsRouter.post('/', requireAdmin, async (req, res) => {
   try {
-    const { email, name, plan } = req.body as Record<string, string>;
+    const { email, name } = req.body as Record<string, string>;
     if (!email || !name) { res.status(400).json({ error: 'email e name são obrigatórios' }); return; }
-    const tenant = await provisionTenant({ email, name, plan });
-    res.status(201).json(tenant);
+    const { tenant, isNew, chatwootPassword } = await findOrCreateTenant(email, { wcUserName: name });
+    if (isNew && chatwootPassword) {
+      await sendWelcomeEmailWithChatwoot(email, name, tenant._id, chatwootPassword);
+    }
+    res.status(isNew ? 201 : 200).json(tenant);
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 

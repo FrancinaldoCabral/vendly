@@ -57,6 +57,11 @@ interface AgentDoc {
   chatwootAccountId?: string;
 }
 
+interface TenantDoc {
+  _id: string;
+  chatwoot?: { accountId: number; apiKey: string };
+}
+
 interface ConversationDoc {
   agentId: string;
   tenantId: string;
@@ -132,10 +137,14 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     return;
   }
 
-  // Load agent config
+  // Load agent config + tenant Chatwoot credentials
   const db = await getDb();
   const agentDoc = await db.collection<AgentDoc>('agents').findOne({ _id: agentId, tenantId })
     ?? await db.collection<AgentDoc>('agents').findOne({ tenantId, evolutionInstance: { $exists: true } });
+
+  const tenantDoc = await db.collection<TenantDoc>('tenants').findOne({ _id: tenantId });
+  const cwAccountId = tenantDoc?.chatwoot?.accountId?.toString() ?? agentDoc?.chatwootAccountId ?? '';
+  const cwApiKey = tenantDoc?.chatwoot?.apiKey ?? '';
 
   if (!agentDoc) {
     console.error(`[debounce] Agent not found: agentId=${agentId} tenantId=${tenantId}`);
@@ -199,7 +208,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
       maxIter: agentDoc.maxIter,
       tools: agentDoc.tools ?? ['evolution', 'chatwoot'],
       customApis: agentDoc.customApis ?? [],
-      chatwootAccountId: agentDoc.chatwootAccountId,
+      chatwootAccountId: cwAccountId,
     },
   };
 
@@ -228,7 +237,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
 
   // Sync to Chatwoot (outgoing message)
   if (chatwootConvId) {
-    await syncChatwootOutgoing(chatwootConvId, content, agentDoc.chatwootAccountId);
+    await syncChatwootOutgoing(chatwootConvId, content, cwAccountId, cwApiKey);
   }
 
   // Escalation: assign to human team/agent
@@ -237,7 +246,8 @@ export async function processBuffer(agentId: string, conversationId: string, ten
       chatwootConvId,
       agentDoc.escalationTeamId,
       agentDoc.escalationAgentId,
-      agentDoc.chatwootAccountId,
+      cwAccountId,
+      cwApiKey,
     );
     await redis.set(takeoverKey, '1', 'EX', 60 * 60 * 24); // 24h TTL
     console.log(`[debounce] ESCALATED agent=${agentId} conv=${conversationId}`);
@@ -318,18 +328,16 @@ async function sendEvolutionText(instance: string, jid: string, text: string): P
 async function syncChatwootOutgoing(
   conversationId: number,
   content: string,
-  accountId?: string,
+  accountId: string,
+  apiKey: string,
 ): Promise<void> {
-  const acctId = accountId ?? config.chatwoot.accountId;
-  const url = `${config.chatwoot.url}/api/v1/accounts/${acctId}/conversations/${conversationId}/messages`;
+  if (!accountId || !apiKey) return;
+  const url = `${config.chatwoot.url}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
   const clean = content.replace(/\[ESCALAR_HUMANO\]/g, '').trim();
   try {
     await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api_access_token': config.chatwoot.apiKey,
-      },
+      headers: { 'Content-Type': 'application/json', 'api_access_token': apiKey },
       body: JSON.stringify({ content: clean, message_type: 'outgoing', private: false }),
     });
   } catch (e) {
@@ -342,19 +350,17 @@ async function escalateToHuman(
   teamId?: number,
   assigneeId?: number,
   accountId?: string,
+  apiKey?: string,
 ): Promise<void> {
-  const acctId = accountId ?? config.chatwoot.accountId;
-  const url = `${config.chatwoot.url}/api/v1/accounts/${acctId}/conversations/${conversationId}/assignments`;
+  if (!accountId || !apiKey) return;
+  const url = `${config.chatwoot.url}/api/v1/accounts/${accountId}/conversations/${conversationId}/assignments`;
   const payload: Record<string, unknown> = {};
   if (teamId) payload.team_id = teamId;
   if (assigneeId) payload.assignee_id = assigneeId;
   try {
     await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api_access_token': config.chatwoot.apiKey,
-      },
+      headers: { 'Content-Type': 'application/json', 'api_access_token': apiKey },
       body: JSON.stringify(payload),
     });
   } catch (e) {

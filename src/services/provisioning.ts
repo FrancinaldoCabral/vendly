@@ -24,6 +24,10 @@ export interface TenantDoc {
   plan: string;
   status: 'active' | 'suspended';
   createdAt: Date;
+  chatwoot?: {
+    accountId: number;
+    apiKey: string; // api_access_token for this tenant's Chatwoot account
+  };
 }
 
 export interface ProvisionAgentInput {
@@ -108,13 +112,16 @@ export async function checkWcSubscription(email: string): Promise<WcSubscription
 export async function findOrCreateTenant(
   email: string,
   wcInfo?: { wcUserId?: number; wcUserName?: string },
-): Promise<{ tenant: TenantDoc; isNew: boolean }> {
+): Promise<{ tenant: TenantDoc; isNew: boolean; chatwootPassword?: string }> {
   const db = await getDb();
   const existing = await db.collection<TenantDoc>('tenants').findOne({ email });
   if (existing) return { tenant: existing, isNew: false };
 
   const tenantId = generateId();
   const name = wcInfo?.wcUserName ?? email.split('@')[0];
+
+  // Create Chatwoot account for this tenant
+  const cwAccount = await createChatwootAccount(email, name);
 
   const tenant: TenantDoc = {
     _id: tenantId,
@@ -124,11 +131,12 @@ export async function findOrCreateTenant(
     plan: 'starter',
     status: 'active',
     createdAt: new Date(),
+    chatwoot: cwAccount ? { accountId: cwAccount.accountId, apiKey: cwAccount.apiKey } : undefined,
   };
 
   await db.collection<TenantDoc>('tenants').insertOne(tenant);
-  console.log(`[provisioning] Tenant created: ${tenantId} email=${email}`);
-  return { tenant, isNew: true };
+  console.log(`[provisioning] Tenant created: ${tenantId} email=${email} chatwootAccountId=${cwAccount?.accountId}`);
+  return { tenant, isNew: true, chatwootPassword: cwAccount?.password };
 }
 
 // ── Send magic link (for returning users and new users alike) ────────────────
@@ -137,6 +145,63 @@ export async function sendMagicLink(email: string, tenantId: string, name: strin
   const token = jwt.sign({ tenantId, email }, config.jwt.secret, { expiresIn: '7d' });
   const loginUrl = `${config.app.url}/login?token=${token}`;
   await sendLoginEmail(email, name, loginUrl);
+}
+
+export async function sendWelcomeEmailWithChatwoot(
+  email: string,
+  name: string,
+  tenantId: string,
+  chatwootPassword: string,
+): Promise<void> {
+  const token = jwt.sign({ tenantId, email }, config.jwt.secret, { expiresIn: '30d' });
+  const dashboardUrl = `${config.app.url}/login?token=${token}`;
+  const chatwootUrl = config.chatwoot.url;
+
+  if (!config.smtp.host) {
+    console.log(`[provisioning] SMTP not configured — credentials: dashboard=${dashboardUrl} chatwoot=${chatwootUrl} email=${email} pass=${chatwootPassword}`);
+    return;
+  }
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: config.smtp.host,
+      port: config.smtp.port,
+      auth: { user: config.smtp.user, pass: config.smtp.password },
+    });
+    await transporter.sendMail({
+      from: config.smtp.from,
+      to: email,
+      subject: 'Bem-vindo ao Vendly — seus acessos',
+      html: `
+        <div style="font-family:sans-serif;max-width:540px;margin:0 auto">
+          <h2 style="color:#0d9488">Vendly</h2>
+          <p>Olá${name ? ` ${name}` : ''},</p>
+          <p>Sua conta foi criada. Aqui estão seus dois acessos:</p>
+
+          <h3 style="margin-top:24px">1. Painel de Controle</h3>
+          <p>Configure seus agentes, conecte o WhatsApp e acompanhe tudo:</p>
+          <p style="margin:16px 0">
+            <a href="${dashboardUrl}"
+               style="background:#0d9488;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">
+              Acessar o Painel
+            </a>
+          </p>
+
+          <h3 style="margin-top:24px">2. CRM de Conversas (Chatwoot)</h3>
+          <p>Veja todas as conversas do WhatsApp, responda manualmente, adicione labels e atribua para sua equipe:</p>
+          <p><strong>Link:</strong> <a href="${chatwootUrl}">${chatwootUrl}</a></p>
+          <p><strong>E-mail:</strong> ${email}</p>
+          <p><strong>Senha:</strong> <code style="background:#f3f4f6;padding:2px 6px;border-radius:4px">${chatwootPassword}</code></p>
+          <p style="color:#888;font-size:13px">Recomendamos alterar sua senha após o primeiro acesso.</p>
+
+          <p style="color:#888;font-size:13px;margin-top:32px">Se não solicitou este acesso, ignore este email.</p>
+        </div>
+      `,
+    });
+    console.log(`[provisioning] Welcome email with Chatwoot sent to ${email}`);
+  } catch (e) {
+    console.error(`[provisioning] Welcome email failed:`, String(e));
+  }
 }
 
 export async function provisionTenant(input: ProvisionTenantInput): Promise<TenantDoc> {
@@ -171,17 +236,24 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentD
   const agentId = generateId();
   const instance = `agent_${agentId}`;
 
-  // 1. Create Evolution instance + register webhook for connection updates
+  // 1. Load tenant to get their Chatwoot credentials
+  const tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: input.tenantId });
+  if (!tenant?.chatwoot) {
+    throw new Error(`Tenant ${input.tenantId} has no Chatwoot account. Call provisionTenant first.`);
+  }
+  const { accountId: cwAccountId, apiKey: cwApiKey } = tenant.chatwoot;
+
+  // 2. Create Evolution instance + register webhook for connection updates
   const evolutionWebhookUrl = `${config.app.url}/webhook/evolution/${instance}`;
   await createEvolutionInstance(instance, evolutionWebhookUrl);
 
-  // 2. Create Chatwoot inbox
-  const inboxId = await createChatwootInbox(instance, input.name, agentId);
+  // 3. Create Chatwoot inbox using tenant's own account
+  const inboxId = await createChatwootInbox(instance, input.name, agentId, cwAccountId, cwApiKey);
 
-  // 3. Create Qdrant collection
+  // 4. Create Qdrant collection
   await createQdrantCollection(agentId);
 
-  // 4. Save agent to MongoDB
+  // 5. Save agent to MongoDB
   const agent: AgentDoc = {
     _id: agentId,
     tenantId: input.tenantId,
@@ -199,9 +271,7 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentD
 
   await db.collection<AgentDoc>('agents').insertOne(agent);
 
-  // 5. QR code URL (Evolution serves it at this endpoint once instance is created)
   const qrCodeUrl = `${config.evolution.url}/instance/qrcode/${instance}`;
-
   console.log(`[provisioning] Agent created: ${agentId} instance=${instance} chatwootInbox=${inboxId}`);
   return { ...agent, qrCodeUrl };
 }
@@ -243,15 +313,20 @@ export async function deprovisionAgent(agentId: string, tenantId: string): Promi
     console.error(`[provisioning] Evolution delete failed:`, String(e));
   }
 
-  // 3. Delete Chatwoot inbox — verified: DELETE /api/v1/accounts/:id/inboxes/:inboxId → 200
+  // 3. Delete Chatwoot inbox using tenant's credentials
   if (agent.chatwootInboxId) {
     try {
-      const cwUrl = config.chatwoot.url.replace(/\/$/, '');
-      const r = await fetch(`${cwUrl}/api/v1/accounts/${config.chatwoot.accountId}/inboxes/${agent.chatwootInboxId}`, {
-        method: 'DELETE',
-        headers: { 'api_access_token': config.chatwoot.apiKey },
-      });
-      console.log(`[provisioning] Chatwoot inbox delete ${agent.chatwootInboxId}: ${r.status}`);
+      const tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: agent.tenantId });
+      if (tenant?.chatwoot) {
+        const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+        const r = await fetch(`${cwUrl}/api/v1/accounts/${tenant.chatwoot.accountId}/inboxes/${agent.chatwootInboxId}`, {
+          method: 'DELETE',
+          headers: { 'api_access_token': tenant.chatwoot.apiKey },
+        });
+        console.log(`[provisioning] Chatwoot inbox delete ${agent.chatwootInboxId}: ${r.status}`);
+      } else {
+        console.warn(`[provisioning] Tenant ${agent.tenantId} has no Chatwoot account — skipping inbox delete`);
+      }
     } catch (e) {
       console.error(`[provisioning] Chatwoot inbox delete failed:`, String(e));
     }
@@ -318,17 +393,88 @@ async function createEvolutionInstance(instance: string, webhookUrl: string): Pr
 
 // ── Chatwoot ─────────────────────────────────────────────────────────────────
 
-async function createChatwootInbox(instance: string, name: string, agentId: string): Promise<number | null> {
-  const webhookUrl = `${config.app.url}/webhook/chatwoot/${agentId}`;
-  const acctId = config.chatwoot.accountId;
-  const evUrl = config.evolution.url.replace(/\/$/, '');
+// Creates a new isolated Chatwoot account for a tenant via /auth/sign_up.
+// Returns { accountId, apiKey, password } or null on failure.
+export async function createChatwootAccount(
+  email: string,
+  name: string,
+): Promise<{ accountId: number; apiKey: string; password: string } | null> {
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
-  const cwHeaders = { 'Content-Type': 'application/json', 'api_access_token': config.chatwoot.apiKey };
+  const password = generatePassword();
 
-  // Step 1: snapshot existing inbox IDs so we can identify the new one after creation
+  try {
+    const r = await fetch(`${cwUrl}/auth/sign_up`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        account_name: name,
+        email,
+        name,
+        password,
+        password_confirmation: password,
+      }),
+    });
+
+    const body = await r.text();
+    console.log(`[provisioning] Chatwoot sign_up ${email}: status=${r.status} body=${body.slice(0, 300)}`);
+
+    if (!r.ok) return null;
+
+    const data = JSON.parse(body) as {
+      data?: {
+        access_token?: string;
+        account_id?: number;
+        accounts?: { id: number }[];
+      };
+    };
+
+    const apiKey = data.data?.access_token ?? '';
+    if (!apiKey) {
+      console.error('[provisioning] Chatwoot sign_up: no access_token in response');
+      return null;
+    }
+
+    // Get account_id from profile (sign_up may or may not include it directly)
+    let accountId = data.data?.account_id ?? data.data?.accounts?.[0]?.id;
+    if (!accountId) {
+      const profileR = await fetch(`${cwUrl}/api/v1/profile`, {
+        headers: { 'api_access_token': apiKey },
+      });
+      if (profileR.ok) {
+        const profile = await profileR.json() as { account_id?: number };
+        accountId = profile.account_id;
+      }
+    }
+
+    if (!accountId) {
+      console.error('[provisioning] Chatwoot: could not determine account_id after sign_up');
+      return null;
+    }
+
+    console.log(`[provisioning] Chatwoot account created: accountId=${accountId} email=${email}`);
+    return { accountId: Number(accountId), apiKey, password };
+  } catch (e) {
+    console.error('[provisioning] Chatwoot account creation error:', String(e));
+    return null;
+  }
+}
+
+async function createChatwootInbox(
+  instance: string,
+  name: string,
+  agentId: string,
+  cwAccountId: number,
+  cwApiKey: string,
+): Promise<number | null> {
+  const webhookUrl = `${config.app.url}/webhook/chatwoot/${agentId}`;
+  const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+  const cwHeaders = { 'Content-Type': 'application/json', 'api_access_token': cwApiKey };
+  const evUrl = config.evolution.url.replace(/\/$/, '');
+
+  // Step 1: snapshot existing inbox IDs so we can diff after creation
   let existingIds = new Set<number>();
   try {
-    const listRes = await fetch(`${cwUrl}/api/v1/accounts/${acctId}/inboxes`, { headers: cwHeaders });
+    const listRes = await fetch(`${cwUrl}/api/v1/accounts/${cwAccountId}/inboxes`, { headers: cwHeaders });
     if (listRes.ok) {
       const { payload } = await listRes.json() as { payload: { id: number }[] };
       existingIds = new Set(payload.map(i => i.id));
@@ -337,17 +483,16 @@ async function createChatwootInbox(instance: string, name: string, agentId: stri
     console.warn('[provisioning] Could not list existing inboxes:', String(e));
   }
 
-  // Step 2: call Evolution's /chatwoot/set (Evolution v2.3+)
-  // This links the WhatsApp instance to Chatwoot and creates the inbox via autoCreate
-  // Fields are camelCase in Evolution v2 (accountId, nameInbox, reopenConversation, etc.)
+  // Step 2: call Evolution /chatwoot/set — links this instance to the tenant's Chatwoot account
+  // Evolution v2.3+ requires camelCase fields
   try {
     const r = await fetch(`${evUrl}/chatwoot/set/${instance}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
       body: JSON.stringify({
         enabled: true,
-        accountId: acctId,
-        token: config.chatwoot.apiKey,
+        accountId: cwAccountId,
+        token: cwApiKey,
         url: config.chatwoot.url,
         nameInbox: name,
         signMsg: false,
@@ -358,42 +503,39 @@ async function createChatwootInbox(instance: string, name: string, agentId: stri
     });
 
     const rawBody = await r.text();
-    console.log(`[provisioning] Evolution Chatwoot set ${instance}: status=${r.status} body=${rawBody.slice(0, 300)}`);
+    console.log(`[provisioning] Evolution /chatwoot/set ${instance}: status=${r.status} body=${rawBody.slice(0, 300)}`);
 
     if (r.ok) {
-      // autoCreate: true causes Chatwoot to create the inbox immediately.
-      // The /chatwoot/set response does NOT include inbox_id, so we diff the inbox list.
-      await new Promise(resolve => setTimeout(resolve, 800)); // wait for Chatwoot to process
-      const listRes2 = await fetch(`${cwUrl}/api/v1/accounts/${acctId}/inboxes`, { headers: cwHeaders });
+      // autoCreate creates the inbox immediately but /chatwoot/set does NOT return inbox_id
+      // Identify it by diffing the inbox list before vs after
+      await new Promise(resolve => setTimeout(resolve, 800));
+      const listRes2 = await fetch(`${cwUrl}/api/v1/accounts/${cwAccountId}/inboxes`, { headers: cwHeaders });
       if (listRes2.ok) {
         const { payload: inboxes } = await listRes2.json() as { payload: { id: number; name: string }[] };
-        // Prefer the inbox that wasn't in the snapshot (newly created)
-        const newInbox = inboxes.find(i => !existingIds.has(i.id)) ?? inboxes.filter(i => i.name === name).sort((a, b) => b.id - a.id)[0];
+        const newInbox = inboxes.find(i => !existingIds.has(i.id))
+          ?? inboxes.filter(i => i.name === name).sort((a, b) => b.id - a.id)[0];
         if (newInbox) {
-          console.log(`[provisioning] Chatwoot inbox created via Evolution: id=${newInbox.id} name=${newInbox.name}`);
-          await registerChatwootWebhook(Number(acctId), webhookUrl);
+          console.log(`[provisioning] Chatwoot inbox created: id=${newInbox.id} name=${newInbox.name}`);
+          await registerChatwootWebhook(cwAccountId, cwApiKey, webhookUrl);
           return newInbox.id;
         }
       }
-      console.warn('[provisioning] /chatwoot/set succeeded but could not find new inbox in Chatwoot list');
+      console.warn('[provisioning] /chatwoot/set succeeded but could not find new inbox');
     }
   } catch (e) {
-    console.error('[provisioning] Evolution Chatwoot set error:', String(e));
+    console.error('[provisioning] Evolution /chatwoot/set error:', String(e));
   }
 
-  console.error(`[provisioning] Failed to create Chatwoot inbox for agent=${agentId} instance=${instance}`);
+  console.error(`[provisioning] Failed to create Chatwoot inbox agent=${agentId} instance=${instance}`);
   return null;
 }
 
-async function registerChatwootWebhook(accountId: number, webhookUrl: string): Promise<void> {
-  // Correct Chatwoot endpoint: /api/v1/accounts/:id/webhooks (NOT /integrations/webhooks)
+async function registerChatwootWebhook(accountId: number, apiKey: string, webhookUrl: string): Promise<void> {
+  const cwUrl = config.chatwoot.url.replace(/\/$/, '');
   try {
-    const r = await fetch(`${config.chatwoot.url.replace(/\/$/, '')}/api/v1/accounts/${accountId}/webhooks`, {
+    const r = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/webhooks`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api_access_token': config.chatwoot.apiKey,
-      },
+      headers: { 'Content-Type': 'application/json', 'api_access_token': apiKey },
       body: JSON.stringify({
         url: webhookUrl,
         subscriptions: ['message_created', 'conversation_updated'],
@@ -479,4 +621,9 @@ async function sendWelcomeEmail(email: string, name: string, loginUrl: string): 
 
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function generatePassword(): string {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
+  return Array.from({ length: 16 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 }

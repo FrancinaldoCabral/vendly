@@ -17,8 +17,10 @@ export const config = {
   },
   chatwoot: {
     url: process.env.CHATWOOT_URL ?? 'http://localhost:3000',
-    apiKey: process.env.CHATWOOT_API_KEY ?? '',
-    accountId: process.env.CHATWOOT_ACCOUNT_ID ?? '1',
+    // apiKey and accountId are per-tenant (stored in TenantDoc.chatwoot)
+    // kept here as empty strings so legacy tool code compiles without changes
+    apiKey: '',
+    accountId: '',
   },
   mongodb: {
     uri: process.env.MONGODB_URI ?? 'mongodb://localhost:27017',
