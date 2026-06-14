@@ -171,11 +171,13 @@ agentsRouter.get('/:agentId/status', async (req, res) => {
     const state = data.instance?.state ?? data.state ?? data.connectionStatus ?? '';
     const connected = state === 'open';
 
-    // Auto-update agent status when connected
-    if (connected && agent.status === 'pending_qr') {
+    // Auto-update agent status when connected (fallback if webhook missed)
+    let agentStatus = agent.status ?? '';
+    if (connected && agentStatus === 'pending_qr') {
       await db.collection('agents').updateOne(filter, { $set: { status: 'active' } });
+      agentStatus = 'active';
     }
 
-    res.json({ ...data, agentStatus: agent.status, connected });
+    res.json({ ...data, agentStatus, connected });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });

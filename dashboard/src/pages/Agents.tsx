@@ -76,18 +76,18 @@ function QrModal({ agentId, agentName, open, onClose }: { agentId: string; agent
     setQrError('');
     fetchQr();
 
-    // Poll connection state every 5s
+    // Poll connection state every 3s — check both Evolution state and MongoDB status (updated by webhook)
     statusRef.current = setInterval(async () => {
       try {
         const d = await api.getAgentStatus(agentId);
-        if (d.connected) {
+        if (d.connected || d.agentStatus === 'active') {
           setConnected(true);
           if (statusRef.current) clearInterval(statusRef.current);
           if (refreshRef.current) clearInterval(refreshRef.current);
           qc.invalidateQueries({ queryKey: ['agents'] });
         }
       } catch { /* ignore */ }
-    }, 5000);
+    }, 3000);
 
     // Refresh QR every 10s (QR codes expire after ~20–30s)
     refreshRef.current = setInterval(fetchQr, 10_000);
@@ -379,7 +379,7 @@ function AgentModal({ agent, open, onClose }: {
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function Agents() {
-  const { data: agents = [], isLoading } = useQuery({ queryKey: ['agents'], queryFn: api.getAgents });
+  const { data: agents = [], isLoading } = useQuery({ queryKey: ['agents'], queryFn: api.getAgents, refetchInterval: 15_000 });
   const qc = useQueryClient();
 
   const [modalOpen, setModalOpen] = useState(false);
