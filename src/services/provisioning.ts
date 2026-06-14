@@ -708,7 +708,7 @@ export async function reprovisionAgent(agentId: string): Promise<{ ok: boolean; 
       headers: evHeaders,
       body: JSON.stringify({
         enabled: true,
-        accountId: cwAccountId,
+        accountId: String(cwAccountId), // Evolution requires string
         token: cwApiKey,
         url: config.chatwoot.url,
         nameInbox: agent.name,
