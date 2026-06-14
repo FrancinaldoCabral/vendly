@@ -541,7 +541,7 @@ async function createChatwootInbox(
       headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
       body: JSON.stringify({
         enabled: true,
-        accountId: cwAccountId,
+        accountId: String(cwAccountId), // Evolution requires accountId as string
         token: cwApiKey,
         url: config.chatwoot.url,
         nameInbox: name,
@@ -558,10 +558,11 @@ async function createChatwootInbox(
     if (r.ok) {
       // autoCreate creates the inbox immediately but /chatwoot/set does NOT return inbox_id
       // Identify it by diffing the inbox list before vs after
-      await new Promise(resolve => setTimeout(resolve, 800));
+      await new Promise(resolve => setTimeout(resolve, 1500));
       const listRes2 = await fetch(`${cwUrl}/api/v1/accounts/${cwAccountId}/inboxes`, { headers: cwHeaders });
       if (listRes2.ok) {
-        const { payload: inboxes } = await listRes2.json() as { payload: { id: number; name: string }[] };
+        const listData2 = await listRes2.json() as { payload?: { id: number; name: string }[] } | { id: number; name: string }[];
+        const inboxes = Array.isArray(listData2) ? listData2 : (listData2.payload ?? []);
         const newInbox = inboxes.find(i => !existingIds.has(i.id))
           ?? inboxes.filter(i => i.name === name).sort((a, b) => b.id - a.id)[0];
         if (newInbox) {
@@ -683,7 +684,10 @@ export async function reprovisionAgent(agentId: string): Promise<{ ok: boolean; 
   try {
     const listRes = await fetch(`${cwUrl2}/api/v1/accounts/${cwAccountId}/webhooks`, { headers: cwHeaders });
     if (listRes.ok) {
-      const { payload: webhooks } = await listRes.json() as { payload: Array<{ id: number; url: string }> };
+      const whData = await listRes.json() as { webhooks?: Array<{ id: number; url: string }> } | { payload?: Array<{ id: number; url: string }> };
+      const webhooks: Array<{ id: number; url: string }> = (whData as { webhooks?: Array<{ id: number; url: string }> }).webhooks
+        ?? (whData as { payload?: Array<{ id: number; url: string }> }).payload
+        ?? [];
       const existing = webhooks.find(w => w.url === cwWebhookUrl);
       if (existing) {
         results.chatwoot_webhook = `already registered id=${existing.id}`;

@@ -200,14 +200,16 @@ apiRouter.get('/admin/tenant-state', requireAuth, requireAdmin, async (req, res)
           fetch(`${cwUrl}/api/v1/accounts/${tenant.chatwoot.accountId}/webhooks`, { headers: cwHeaders }),
         ]);
         if (inboxRes.ok) {
-          const { payload: inboxes } = await inboxRes.json() as { payload: unknown[] };
-          result.chatwoot_inboxes = inboxes;
+          const inboxData = await inboxRes.json() as { payload?: unknown[] } | unknown[];
+          result.chatwoot_inboxes = Array.isArray(inboxData) ? inboxData : (inboxData as { payload?: unknown[] }).payload ?? inboxData;
         } else {
           result.chatwoot_inboxes_error = inboxRes.status;
         }
         if (webhookRes.ok) {
-          const { payload: webhooks } = await webhookRes.json() as { payload: unknown[] };
-          result.chatwoot_webhooks = webhooks;
+          const whData = await webhookRes.json() as { webhooks?: unknown[] } | { payload?: unknown[] };
+          result.chatwoot_webhooks = (whData as { webhooks?: unknown[] }).webhooks
+            ?? (whData as { payload?: unknown[] }).payload
+            ?? whData;
         } else {
           result.chatwoot_webhooks_error = webhookRes.status;
         }
