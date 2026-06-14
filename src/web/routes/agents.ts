@@ -94,7 +94,7 @@ agentsRouter.delete('/:agentId', async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// GET /api/agents/:agentId/qr — returns QR code URL for Evolution
+// GET /api/agents/:agentId/qr — returns QR code for Evolution instance
 agentsRouter.get('/:agentId/qr', async (req, res) => {
   try {
     const tenantId = req.auth!.tenantId;
@@ -105,12 +105,42 @@ agentsRouter.get('/:agentId/qr', async (req, res) => {
     if (!agent) { res.status(404).json({ error: 'Agent not found' }); return; }
 
     const instance = agent.evolutionInstance;
-    const qrUrl = `${config.evolution.url}/instance/qrcode/${instance}`;
-    // Proxy the QR from Evolution
-    const r = await fetch(qrUrl, { headers: { apikey: config.evolution.apiKey } });
-    if (!r.ok) { res.status(502).json({ error: `Evolution QR fetch failed: ${r.status}` }); return; }
-    const data = await r.json();
-    res.json(data);
+    const evUrl = config.evolution.url.replace(/\/$/, '');
+    const headers = { apikey: config.evolution.apiKey };
+
+    // Normalize any Evolution response shape to { base64, code }
+    function extractQr(data: unknown): { base64: string | null; code: string | null } {
+      const d = data as Record<string, unknown>;
+      // flat: { base64, code }
+      if (d?.base64) return { base64: d.base64 as string, code: (d.code as string) ?? null };
+      // wrapped: { qrcode: { base64, code } }
+      const qr = d?.qrcode as Record<string, unknown> | undefined;
+      if (qr?.base64) return { base64: qr.base64 as string, code: (qr.code as string) ?? null };
+      // deep: { instance: { qrcode: { base64, code } } }
+      const inst = (d?.instance as Record<string, unknown> | undefined)?.qrcode as Record<string, unknown> | undefined;
+      if (inst?.base64) return { base64: inst.base64 as string, code: (inst.code as string) ?? null };
+      return { base64: null, code: null };
+    }
+
+    // Try /instance/connect/{name} first — returns fresh QR in Evolution v2
+    try {
+      const r = await fetch(`${evUrl}/instance/connect/${instance}`, { headers });
+      if (r.ok) {
+        const result = extractQr(await r.json());
+        if (result.base64) { res.json(result); return; }
+      }
+    } catch { /* fallthrough */ }
+
+    // Fallback: /instance/qrcode/{name}?image=true — works on most versions
+    try {
+      const r2 = await fetch(`${evUrl}/instance/qrcode/${instance}?image=true`, { headers });
+      if (r2.ok) {
+        const result = extractQr(await r2.json());
+        if (result.base64) { res.json(result); return; }
+      }
+    } catch { /* fallthrough */ }
+
+    res.json({ base64: null, code: null });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 

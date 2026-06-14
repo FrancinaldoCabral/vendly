@@ -43,6 +43,7 @@ function statusBadge(status: Agent['status']) {
 function QrModal({ agentId, agentName, open, onClose }: { agentId: string; agentName: string; open: boolean; onClose: () => void }) {
   const [qrBase64, setQrBase64] = useState<string | null>(null);
   const [qrLoading, setQrLoading] = useState(false);
+  const [qrError, setQrError] = useState('');
   const [connected, setConnected] = useState(false);
   const statusRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const refreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -50,10 +51,17 @@ function QrModal({ agentId, agentName, open, onClose }: { agentId: string; agent
 
   const fetchQr = useCallback(async () => {
     setQrLoading(true);
+    setQrError('');
     try {
       const d = await api.getAgentQr(agentId);
-      setQrBase64(d.base64);
-    } catch { /* ignore */ }
+      if (d.base64) {
+        setQrBase64(d.base64);
+      } else {
+        setQrError('QR não disponível ainda — aguarde ou clique em Atualizar.');
+      }
+    } catch (e) {
+      setQrError((e as Error).message || 'Erro ao buscar QR code.');
+    }
     setQrLoading(false);
   }, [agentId]);
 
@@ -65,8 +73,10 @@ function QrModal({ agentId, agentName, open, onClose }: { agentId: string; agent
     }
     setConnected(false);
     setQrBase64(null);
+    setQrError('');
     fetchQr();
 
+    // Poll connection state every 5s
     statusRef.current = setInterval(async () => {
       try {
         const d = await api.getAgentStatus(agentId);
@@ -78,7 +88,9 @@ function QrModal({ agentId, agentName, open, onClose }: { agentId: string; agent
         }
       } catch { /* ignore */ }
     }, 5000);
-    refreshRef.current = setInterval(fetchQr, 30_000);
+
+    // Refresh QR every 10s (QR codes expire after ~20–30s)
+    refreshRef.current = setInterval(fetchQr, 10_000);
 
     return () => {
       if (statusRef.current) clearInterval(statusRef.current);
@@ -105,9 +117,14 @@ function QrModal({ agentId, agentName, open, onClose }: { agentId: string; agent
             {qrLoading ? <Spin size="large" /> : qrBase64 ? (
               <img src={qrBase64} alt="QR Code" style={{ width: '100%', height: '100%', objectFit: 'contain', borderRadius: 10 }} />
             ) : (
-              <Text type="secondary">QR indisponível</Text>
+              <div style={{ padding: 16 }}>
+                <Text type="secondary" style={{ fontSize: 13 }}>Aguardando QR code…</Text>
+              </div>
             )}
           </div>
+          {qrError && (
+            <Alert type="warning" message={qrError} showIcon style={{ marginBottom: 12, textAlign: 'left' }} />
+          )}
           <Paragraph type="secondary" style={{ fontSize: 13 }}>
             No celular: <Text strong>WhatsApp → Dispositivos conectados → Conectar dispositivo</Text>
           </Paragraph>
@@ -190,7 +207,12 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
 
 // ── Agent Form Modal ─────────────────────────────────────────────────────────
 
-function AgentModal({ agent, open, onClose }: { agent: Agent | null; open: boolean; onClose: () => void }) {
+function AgentModal({ agent, open, onClose, onCreated }: {
+  agent: Agent | null;
+  open: boolean;
+  onClose: () => void;
+  onCreated?: (agent: Agent) => void;
+}) {
   const qc = useQueryClient();
   const [form] = Form.useForm();
   const [customApis, setCustomApis] = useState<CustomApi[]>([]);
@@ -199,10 +221,10 @@ function AgentModal({ agent, open, onClose }: { agent: Agent | null; open: boole
   useEffect(() => {
     if (!open) return;
     if (agent) {
+      // Populate from cached list data immediately, then fetch full agent for systemPrompt
       form.setFieldsValue({
         name: agent.name,
         assistantName: agent.assistantName,
-        systemPrompt: agent.systemPrompt,
         tools: agent.tools,
         model: agent.model ?? 'google/gemini-2.5-flash-lite',
         temperature: agent.temperature ?? 0.7,
@@ -212,6 +234,11 @@ function AgentModal({ agent, open, onClose }: { agent: Agent | null; open: boole
         respondToAll: agent.groupConfig?.respondToAll ?? false,
       });
       setCustomApis(agent.customApis ?? []);
+      // Fetch full agent to load systemPrompt (excluded from list endpoint)
+      api.getAgent(agent._id).then(full => {
+        form.setFieldsValue({ systemPrompt: full.systemPrompt });
+        setCustomApis(full.customApis ?? []);
+      }).catch(() => { /* silently ignore — user can re-enter if fetch fails */ });
     } else {
       form.resetFields();
       form.setFieldsValue({ model: 'google/gemini-2.5-flash-lite', temperature: 0.7, maxIter: 8, tools: ['evolution', 'chatwoot'], respondToMentions: true, respondToReplies: true, respondToAll: false });
@@ -223,8 +250,9 @@ function AgentModal({ agent, open, onClose }: { agent: Agent | null; open: boole
     mutationFn: (vals: Record<string, unknown>) => api.createAgent(buildPayload(vals)),
     onSuccess: ({ agent: created }) => {
       qc.invalidateQueries({ queryKey: ['agents'] });
-      message.success(`Agente "${created.name}" criado! Conecte o WhatsApp.`);
+      message.success(`Agente "${created.name}" criado! Conecte o WhatsApp para ativar.`);
       onClose();
+      onCreated?.(created as Agent);
     },
     onError: (e: Error) => message.error(e.message),
   });
@@ -445,7 +473,12 @@ export default function Agents() {
         })}
       </Space>
 
-      <AgentModal open={modalOpen} agent={editAgent} onClose={() => setModalOpen(false)} />
+      <AgentModal
+        open={modalOpen}
+        agent={editAgent}
+        onClose={() => setModalOpen(false)}
+        onCreated={(a) => setQrAgent(a)}
+      />
       {qrAgent && (
         <QrModal
           agentId={qrAgent._id}
