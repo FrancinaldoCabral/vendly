@@ -3,7 +3,9 @@
  * Replaces the /agent-loop HTTP endpoint and wf-executor-v1 N8N workflow.
  * Supports dynamic tool registry: built-in namespaces (toggleable) + custom HTTP APIs.
  */
+import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
+import { getRedis } from '../tools/redis.js';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { n8nTools, handleN8nTool } from '../tools/n8n.js';
 import { evolutionTools, handleEvolutionTool } from '../tools/evolution.js';
@@ -32,6 +34,16 @@ export interface CustomApi {
   method: string;
   headers?: { key: string; value: string }[];
   schema: Record<string, unknown>;
+  /**
+   * How the tool behaves:
+   *  - 'responding' (default): the LLM waits for the result and composes the reply.
+   *  - 'void': the agent runs it and just confirms to the contact (no payload back to the LLM).
+   *  - 'async': fires the request, the agent tells the contact "estou verificando…", and the
+   *    real answer arrives later via POST /webhook/tool-result/{token} → a follow-up message.
+   */
+  kind?: 'responding' | 'void' | 'async';
+  /** For async tools: short label of what we're waiting on (used in the "verificando…" message). */
+  waitingMessage?: string;
 }
 
 export interface AgentConfig {
@@ -40,6 +52,8 @@ export interface AgentConfig {
   maxIter?: number;
   /** Built-in tool namespaces enabled for this agent, e.g. ['evolution', 'chatwoot', 'mongo'] */
   tools: string[];
+  /** Granular built-in tools picked from the friendly catalog, e.g. ['evolution_send_location']. */
+  builtinTools?: string[];
   customApis: CustomApi[];
   chatwootAccountId?: string;
 }
@@ -49,6 +63,7 @@ export interface AgentLoopContext {
   tenantId: string;
   instance: string;
   senderPhone: string;
+  contactJid?: string;        // needed to deliver async tool follow-ups to the right chat
   chatwootConvId?: number;
   messages: OpenRouterMessage[];
   agent: AgentConfig;
@@ -98,8 +113,20 @@ const BUSCAR_MEMORIA_TOOL = {
   },
 };
 
+const ALL_BUILTIN_TOOLS: Tool[] = Object.values(BUILTIN_NAMESPACES).flat();
+
 function buildToolList(agent: AgentConfig) {
-  const builtins = agent.tools.flatMap(ns => BUILTIN_NAMESPACES[ns] ?? []).map(mcpToOpenRouterTool);
+  // Namespace-level enabling (legacy / power users) + granular catalog picks.
+  const byNamespace = agent.tools.flatMap(ns => BUILTIN_NAMESPACES[ns] ?? []);
+  const granularIds = new Set(agent.builtinTools ?? []);
+  const byGranular = granularIds.size ? ALL_BUILTIN_TOOLS.filter(t => granularIds.has(t.name)) : [];
+
+  // Dedupe by tool name
+  const seen = new Set<string>();
+  const builtins = [...byNamespace, ...byGranular]
+    .filter(t => (seen.has(t.name) ? false : (seen.add(t.name), true)))
+    .map(mcpToOpenRouterTool);
+
   const customs = agent.customApis.map(api => ({
     type: 'function' as const,
     function: { name: api.name, description: api.description, parameters: api.schema },
@@ -243,7 +270,9 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
   const { agentId, tenantId, instance, senderPhone, messages, agent } = ctx;
   const apiKey = config.openrouter.apiKey;
   const FALLBACK_MODEL = config.openrouter.fallbackModel;
-  const MAX_ITER = agent.maxIter ?? 10;
+  // No functional limit on tool rounds (that was an n8n constraint). A high safety
+  // cap only guards against a runaway loop / runaway cost — never reached normally.
+  const SAFETY_CAP = 100;
 
   // Self-loop detection: skip if the sender is the bot itself
   if (senderPhone && instance) {
@@ -282,7 +311,7 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
     };
   };
 
-  for (let iter = 0; iter < MAX_ITER; iter++) {
+  for (let iter = 0; iter < SAFETY_CAP; iter++) {
     const msgs = Array.isArray(currentBody.messages) ? currentBody.messages as unknown[] : [];
     const ctxChars = JSON.stringify(msgs).length;
     ctxLog.push(`round${iter}:${ctxChars}chars`);
@@ -365,7 +394,37 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
           // Check if it's a custom API
           const customApi = agent.customApis.find(a => a.name === toolName);
           if (customApi) {
-            content = await executeCustomApi(customApi, args);
+            const kind = customApi.kind ?? 'responding';
+            if (kind === 'async') {
+              // Fire-and-acknowledge: register a callback token, fire the request, and
+              // tell the LLM to reassure the contact. The real result arrives later.
+              const token = randomUUID();
+              await getRedis().set(
+                `tool_pending:${token}`,
+                JSON.stringify({
+                  agentId, tenantId, instance,
+                  contactJid: ctx.contactJid ?? '',
+                  chatwootConvId: ctx.chatwootConvId ?? null,
+                  toolName,
+                }),
+                'EX', 60 * 60 * 6, // 6h to receive the callback
+              );
+              const callbackUrl = `${config.app.url}/webhook/tool-result/${token}`;
+              await executeCustomApi(customApi, { ...args, callback_url: callbackUrl }).catch(() => {});
+              const waiting = customApi.waitingMessage || toolName;
+              content = `[ASYNC] A ferramenta "${toolName}" foi acionada e está processando em segundo plano. `
+                + `Diga ao cliente, de forma natural e curta, que você está verificando "${waiting}" e que retorna em breve. `
+                + `NÃO invente o resultado — apenas confirme que está verificando.`;
+            } else if (kind === 'void') {
+              // Execute and just confirm — no payload returned to the LLM.
+              const raw = await executeCustomApi(customApi, args);
+              const failed = raw.startsWith('❌');
+              content = failed
+                ? `A ação "${toolName}" falhou: ${raw.slice(0, 200)}. Avise o cliente com gentileza.`
+                : `A ação "${toolName}" foi executada com sucesso. Confirme ao cliente de forma natural e curta.`;
+            } else {
+              content = await executeCustomApi(customApi, args);
+            }
           } else {
             const raw = await routeBuiltinTool(toolName, args);
             // Unwrap { ok, result } wrapper if present

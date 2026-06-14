@@ -6,6 +6,7 @@ import { checkWcSubscription, findOrCreateTenant, sendMagicLink, reprovisionAgen
 import { tenantsRouter } from './routes/tenants.js';
 import { agentsRouter } from './routes/agents.js';
 import { connectionsRouter } from './routes/connections.js';
+import { TOOL_CATALOG } from '../services/tool-catalog.js';
 import { knowledgeRouter } from './routes/knowledge.js';
 import { scheduledPostsRouter } from './routes/scheduled_posts.js';
 import { conversationsRouter } from './routes/conversations.js';
@@ -338,6 +339,11 @@ apiRouter.post('/admin/reset', requireAuth, requireAdmin, async (_req, res) => {
 
 // All routes below require auth
 apiRouter.use(requireAuth);
+// Friendly built-in tool catalog (for the agent config UI — no technical jargon)
+apiRouter.get('/tool-catalog', (_req, res) => {
+  res.json(TOOL_CATALOG);
+});
+
 apiRouter.use('/tenants', tenantsRouter);
 apiRouter.use('/connections', connectionsRouter);
 apiRouter.use('/agents', agentsRouter);

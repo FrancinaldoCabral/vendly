@@ -54,6 +54,7 @@ interface AgentDoc {
   temperature?: number;
   maxIter?: number;
   tools?: string[];
+  builtinTools?: string[];
   customApis?: Array<{
     name: string;
     description: string;
@@ -254,6 +255,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     tenantId,
     instance,
     senderPhone,
+    contactJid,
     chatwootConvId,
     messages,
     agent: {
@@ -261,6 +263,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
       temperature: agentDoc.temperature,
       maxIter: agentDoc.maxIter,
       tools: agentDoc.tools ?? ['evolution', 'chatwoot'],
+      builtinTools: agentDoc.builtinTools ?? [],
       customApis: agentDoc.customApis ?? [],
       chatwootAccountId: cwAccountId,
     },
@@ -363,6 +366,91 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   } as ConversationDoc & Record<string, unknown>);
 
   console.log(`[debounce] DONE agent=${agentId} conv=${conversationId} chunks=${chunks.length} escalate=${escalate}`);
+}
+
+// ── Async tool result delivery ───────────────────────────────────────────────
+
+/**
+ * Called when an async tool POSTs its result to /webhook/tool-result/{token}.
+ * Re-invokes the agent with the result injected and sends the follow-up reply,
+ * honoring the golden rule (the conversation always ends with the agent).
+ */
+export async function handleToolResult(token: string, resultText: string): Promise<void> {
+  const redis = getRedis();
+  const raw = await redis.get(`tool_pending:${token}`);
+  if (!raw) {
+    console.log(`[tool-result] unknown/expired token=${token}`);
+    return;
+  }
+  await redis.del(`tool_pending:${token}`);
+
+  let p: { agentId: string; tenantId: string; instance: string; contactJid: string; chatwootConvId: number | null; toolName: string };
+  try { p = JSON.parse(raw); } catch { return; }
+  if (!p.contactJid) { console.warn(`[tool-result] token=${token} has no contactJid`); return; }
+
+  const db = await getDb();
+  const agentDoc = await db.collection<AgentDoc>('agents').findOne({ _id: p.agentId, tenantId: p.tenantId });
+  if (!agentDoc) { console.error(`[tool-result] agent not found ${p.agentId}`); return; }
+
+  const tenantDoc = await db.collection<TenantDoc>('tenants').findOne({ _id: p.tenantId });
+  const cwAccountId = tenantDoc?.chatwoot?.accountId?.toString() ?? agentDoc.chatwootAccountId ?? '';
+  const cwApiKey = tenantDoc?.chatwoot?.apiKey ?? '';
+
+  const jidKey = p.contactJid.replace(/[^a-z0-9]/gi, '_');
+  const activeSessionKey = `sessao:t:${p.tenantId}:${p.agentId}:${jidKey}`;
+  const sessionRaw = await redis.get(activeSessionKey);
+  let history: OpenRouterMessage[] = [];
+  if (sessionRaw) { try { history = JSON.parse(sessionRaw) as OpenRouterMessage[]; } catch { /**/ } }
+
+  const note = `[Resultado da ferramenta "${p.toolName}"]\n${resultText}\n\n`
+    + `Responda agora ao cliente com base nesse resultado, de forma natural e curta.`;
+  const messages: OpenRouterMessage[] = [
+    { role: 'system', content: agentDoc.systemPrompt + WHATSAPP_STYLE_SUFFIX },
+    ...history,
+    { role: 'user', content: note },
+  ];
+
+  let result: { content: string; escalate: boolean };
+  try {
+    result = await agentLoop({
+      agentId: p.agentId,
+      tenantId: p.tenantId,
+      instance: p.instance,
+      senderPhone: '',
+      contactJid: p.contactJid,
+      chatwootConvId: p.chatwootConvId ?? undefined,
+      messages,
+      agent: {
+        model: agentDoc.model ?? config.openrouter.chatModel,
+        temperature: agentDoc.temperature,
+        maxIter: agentDoc.maxIter,
+        tools: agentDoc.tools ?? ['evolution', 'chatwoot'],
+        builtinTools: agentDoc.builtinTools ?? [],
+        customApis: agentDoc.customApis ?? [],
+        chatwootAccountId: cwAccountId,
+      },
+    });
+  } catch (e) {
+    console.error(`[tool-result] agentLoop error:`, String(e));
+    return;
+  }
+
+  const { content } = result;
+  if (content === '[SKIP]' || !content.trim()) return;
+
+  const chunks = chunkMessage(content);
+  for (let i = 0; i < chunks.length; i++) {
+    await sendEvolutionText(p.instance, p.contactJid, chunks[i]);
+    if (i < chunks.length - 1) await sleep(700);
+  }
+
+  if (p.chatwootConvId) {
+    await syncChatwootOutgoing(p.chatwootConvId, content, cwAccountId, cwApiKey);
+  }
+
+  const newHistory: OpenRouterMessage[] = [...history, { role: 'user', content: note }, { role: 'assistant', content }];
+  await redis.set(activeSessionKey, JSON.stringify(trimHistory(newHistory, HISTORY_MAX)), 'EX', 60 * 60 * 24 * 7);
+  console.log(`[tool-result] delivered token=${token} agent=${p.agentId} chunks=${chunks.length}`);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

@@ -71,6 +71,7 @@ export interface AgentDoc {
   temperature?: number;
   maxIter?: number;
   tools: string[];
+  builtinTools: string[];
   customApis: unknown[];
   groupConfig: { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean };
   contactFilter: { mode: 'blacklist' | 'whitelist'; contacts: string[]; groups: string[] };
@@ -368,6 +369,7 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentD
     systemPrompt: input.systemPrompt,
     model: input.model ?? config.openrouter.chatModel,
     tools: input.tools ?? ['evolution', 'chatwoot'],
+    builtinTools: [],
     customApis: [],
     groupConfig: { respondToMentions: true, respondToReplies: true, respondToAll: false },
     contactFilter: { mode: 'blacklist', contacts: [], groups: [] }, // default: empty blacklist → everyone passes

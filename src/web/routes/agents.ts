@@ -95,7 +95,8 @@ agentsRouter.put('/:agentId', async (req, res) => {
     if (tenantId !== '__admin__') filter.tenantId = tenantId;
 
     const allowed = ['name', 'systemPrompt', 'model', 'temperature', 'maxIter', 'tools',
-      'customApis', 'groupConfig', 'contactFilter', 'escalationTeamId', 'escalationAgentId', 'status'];
+      'builtinTools', 'customApis', 'groupConfig', 'contactFilter', 'priority',
+      'escalationTeamId', 'escalationAgentId', 'status'];
     const update: Record<string, unknown> = { updatedAt: new Date() };
     for (const k of allowed) {
       if (req.body[k] !== undefined) update[k] = req.body[k];

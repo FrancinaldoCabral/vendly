@@ -24,6 +24,7 @@ import { intelligenceTools, handleIntelligenceTool } from './tools/intelligence.
 import { systemTools, handleSystemTool } from './tools/system.js';
 
 import { registerWebhookRoute, handleEvolutionMessageWebhook } from './services/webhook.js';
+import { handleToolResult } from './services/debounce.js';
 import { startScheduler } from './services/scheduler.js';
 import { findOrCreateTenant, sendWelcomeEmailWithChatwoot, sendMagicLink, provisionAgent, reprovisionEvolutionWebhook } from './services/provisioning.js';
 import { getDb } from './tools/mongodb.js';
@@ -250,6 +251,23 @@ async function main() {
 
   // ── Chatwoot webhook (per-agent) ──────────────────────────────────────────
   registerWebhookRoute(webApp as unknown as import('express').Router);
+
+  // ── Async tool result callback ────────────────────────────────────────────
+  // External systems POST here when an async tool finishes; the agent then sends
+  // the follow-up message to the contact. Body: { result } (or any JSON).
+  webApp.post('/webhook/tool-result/:token', async (req, res) => {
+    res.status(200).json({ ok: true });
+    const { token } = req.params;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const resultText = typeof body.result === 'string'
+      ? body.result
+      : body.result !== undefined ? JSON.stringify(body.result) : JSON.stringify(body);
+    try {
+      await handleToolResult(token, resultText);
+    } catch (e) {
+      console.error(`[tool-result] handler error token=${token}:`, String(e));
+    }
+  });
 
   // ── REST API ──────────────────────────────────────────────────────────────
   webApp.use('/api', apiRouter);
