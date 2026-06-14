@@ -23,6 +23,22 @@ IMPORTANTE: Você está respondendo via WhatsApp. Escreva respostas curtas e nat
 - Nunca escreva parágrafos longos — máximo 3 linhas por mensagem.
 - Use linguagem conversacional e informal.`;
 
+// Default capabilities — embedded in every agent, invisible to the user.
+// The client must NOT have to teach the agent that it can hear/see/send audio:
+// the platform handles media in/out automatically; the model only needs to know
+// it is allowed, so it never wrongly refuses.
+const CAPABILITIES_SUFFIX = `
+
+---
+SUAS CAPACIDADES (já habilitadas pela plataforma — nunca diga que não consegue):
+- Você OUVE áudios: mensagens de voz do cliente já chegam transcritas para você.
+- Você LÊ imagens, fotos, PDFs, documentos e vídeos que o cliente enviar.
+- Você RESPONDE com mensagem de voz (áudio). Quando o cliente te envia um áudio,
+  ou pede para você responder em áudio/voz, basta escrever sua resposta normalmente
+  que a plataforma a converte e envia como áudio automaticamente.
+- NUNCA afirme que não pode ouvir, ver, ler ou enviar áudio/mídia — você pode.
+  Não mencione detalhes técnicos; apenas atenda com naturalidade.`;
+
 // ── In-memory timer map ──────────────────────────────────────────────────────
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -244,7 +260,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
 
   // Build messages array: system + history + new user message
   const messages: OpenRouterMessage[] = [
-    { role: 'system', content: agentDoc.systemPrompt + WHATSAPP_STYLE_SUFFIX + audioNote },
+    { role: 'system', content: agentDoc.systemPrompt + CAPABILITIES_SUFFIX + WHATSAPP_STYLE_SUFFIX + audioNote },
     ...history,
     { role: 'user', content: userContent },
   ];
@@ -405,7 +421,7 @@ export async function handleToolResult(token: string, resultText: string): Promi
   const note = `[Resultado da ferramenta "${p.toolName}"]\n${resultText}\n\n`
     + `Responda agora ao cliente com base nesse resultado, de forma natural e curta.`;
   const messages: OpenRouterMessage[] = [
-    { role: 'system', content: agentDoc.systemPrompt + WHATSAPP_STYLE_SUFFIX },
+    { role: 'system', content: agentDoc.systemPrompt + CAPABILITIES_SUFFIX + WHATSAPP_STYLE_SUFFIX },
     ...history,
     { role: 'user', content: note },
   ];
