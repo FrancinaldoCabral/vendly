@@ -17,8 +17,8 @@ export const config = {
   },
   chatwoot: {
     url: process.env.CHATWOOT_URL ?? 'http://localhost:3000',
+    platformKey: process.env.CHATWOOT_PLATFORM_KEY ?? '',
     // apiKey and accountId are per-tenant (stored in TenantDoc.chatwoot)
-    // kept here as empty strings so legacy tool code compiles without changes
     apiKey: '',
     accountId: '',
   },

@@ -28,9 +28,9 @@ tenantsRouter.post('/', requireAdmin, async (req, res) => {
   try {
     const { email, name } = req.body as Record<string, string>;
     if (!email || !name) { res.status(400).json({ error: 'email e name são obrigatórios' }); return; }
-    const { tenant, isNew, chatwootPassword } = await findOrCreateTenant(email, { wcUserName: name });
-    if (isNew && chatwootPassword) {
-      await sendWelcomeEmailWithChatwoot(email, name, tenant._id, chatwootPassword);
+    const { tenant, isNew, chatwootSsoUrl } = await findOrCreateTenant(email, { wcUserName: name });
+    if (isNew && chatwootSsoUrl) {
+      await sendWelcomeEmailWithChatwoot(email, name, tenant._id, chatwootSsoUrl);
     }
     res.status(isNew ? 201 : 200).json(tenant);
   } catch (e) { res.status(500).json({ error: String(e) }); }

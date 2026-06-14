@@ -26,7 +26,8 @@ export interface TenantDoc {
   createdAt: Date;
   chatwoot?: {
     accountId: number;
-    apiKey: string; // api_access_token for this tenant's Chatwoot account
+    apiKey: string;  // user's api_access_token for runtime Chatwoot API calls
+    ssoUrl: string;  // one-time SSO login link (regenerated on demand)
   };
 }
 
@@ -112,7 +113,7 @@ export async function checkWcSubscription(email: string): Promise<WcSubscription
 export async function findOrCreateTenant(
   email: string,
   wcInfo?: { wcUserId?: number; wcUserName?: string },
-): Promise<{ tenant: TenantDoc; isNew: boolean; chatwootPassword?: string }> {
+): Promise<{ tenant: TenantDoc; isNew: boolean; chatwootSsoUrl?: string }> {
   const db = await getDb();
   const existing = await db.collection<TenantDoc>('tenants').findOne({ email });
   if (existing) return { tenant: existing, isNew: false };
@@ -131,12 +132,12 @@ export async function findOrCreateTenant(
     plan: 'starter',
     status: 'active',
     createdAt: new Date(),
-    chatwoot: cwAccount ? { accountId: cwAccount.accountId, apiKey: cwAccount.apiKey } : undefined,
+    chatwoot: cwAccount ? { accountId: cwAccount.accountId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl } : undefined,
   };
 
   await db.collection<TenantDoc>('tenants').insertOne(tenant);
   console.log(`[provisioning] Tenant created: ${tenantId} email=${email} chatwootAccountId=${cwAccount?.accountId}`);
-  return { tenant, isNew: true, chatwootPassword: cwAccount?.password };
+  return { tenant, isNew: true, chatwootSsoUrl: cwAccount?.ssoUrl };
 }
 
 // ── Send magic link (for returning users and new users alike) ────────────────
@@ -151,14 +152,13 @@ export async function sendWelcomeEmailWithChatwoot(
   email: string,
   name: string,
   tenantId: string,
-  chatwootPassword: string,
+  chatwootSsoUrl: string,
 ): Promise<void> {
   const token = jwt.sign({ tenantId, email }, config.jwt.secret, { expiresIn: '30d' });
   const dashboardUrl = `${config.app.url}/login?token=${token}`;
-  const chatwootUrl = config.chatwoot.url;
 
   if (!config.smtp.host) {
-    console.log(`[provisioning] SMTP not configured — credentials: dashboard=${dashboardUrl} chatwoot=${chatwootUrl} email=${email} pass=${chatwootPassword}`);
+    console.log(`[provisioning] SMTP not configured — dashboard=${dashboardUrl} chatwoot_sso=${chatwootSsoUrl}`);
     return;
   }
 
@@ -187,18 +187,21 @@ export async function sendWelcomeEmailWithChatwoot(
             </a>
           </p>
 
-          <h3 style="margin-top:24px">2. CRM de Conversas (Chatwoot)</h3>
-          <p>Veja todas as conversas do WhatsApp, responda manualmente, adicione labels e atribua para sua equipe:</p>
-          <p><strong>Link:</strong> <a href="${chatwootUrl}">${chatwootUrl}</a></p>
-          <p><strong>E-mail:</strong> ${email}</p>
-          <p><strong>Senha:</strong> <code style="background:#f3f4f6;padding:2px 6px;border-radius:4px">${chatwootPassword}</code></p>
-          <p style="color:#888;font-size:13px">Recomendamos alterar sua senha após o primeiro acesso.</p>
+          <h3 style="margin-top:24px">2. CRM de Conversas</h3>
+          <p>Veja todas as conversas do WhatsApp, responda manualmente, adicione labels e gerencie sua equipe:</p>
+          <p style="margin:16px 0">
+            <a href="${chatwootSsoUrl}"
+               style="background:#1f93ff;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">
+              Acessar o CRM
+            </a>
+          </p>
+          <p style="color:#888;font-size:13px">O link do CRM faz login automático. Após entrar, defina uma senha nas configurações de perfil.</p>
 
           <p style="color:#888;font-size:13px;margin-top:32px">Se não solicitou este acesso, ignore este email.</p>
         </div>
       `,
     });
-    console.log(`[provisioning] Welcome email with Chatwoot sent to ${email}`);
+    console.log(`[provisioning] Welcome email sent to ${email}`);
   } catch (e) {
     console.error(`[provisioning] Welcome email failed:`, String(e));
   }
@@ -393,66 +396,71 @@ async function createEvolutionInstance(instance: string, webhookUrl: string): Pr
 
 // ── Chatwoot ─────────────────────────────────────────────────────────────────
 
-// Creates a new isolated Chatwoot account for a tenant via /auth/sign_up.
-// Returns { accountId, apiKey, password } or null on failure.
+// Creates a new isolated Chatwoot account + admin user via Platform API.
+// Returns { accountId, apiKey, ssoUrl } or null on failure.
+// Verified against production: all 4 steps return 200.
 export async function createChatwootAccount(
   email: string,
   name: string,
-): Promise<{ accountId: number; apiKey: string; password: string } | null> {
+): Promise<{ accountId: number; apiKey: string; ssoUrl: string } | null> {
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
-  const password = generatePassword();
+  const platKey = config.chatwoot.platformKey;
+  const platHeaders = { 'Content-Type': 'application/json', 'api_access_token': platKey };
+
+  if (!platKey) {
+    console.error('[provisioning] CHATWOOT_PLATFORM_KEY not configured');
+    return null;
+  }
 
   try {
-    const r = await fetch(`${cwUrl}/auth/sign_up`, {
+    // Step 1: create isolated account
+    const r1 = await fetch(`${cwUrl}/platform/api/v1/accounts`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        account_name: name,
-        email,
-        name,
-        password,
-        password_confirmation: password,
-      }),
+      headers: platHeaders,
+      body: JSON.stringify({ name }),
     });
-
-    const body = await r.text();
-    console.log(`[provisioning] Chatwoot sign_up ${email}: status=${r.status} body=${body.slice(0, 300)}`);
-
-    if (!r.ok) return null;
-
-    const data = JSON.parse(body) as {
-      data?: {
-        access_token?: string;
-        account_id?: number;
-        accounts?: { id: number }[];
-      };
-    };
-
-    const apiKey = data.data?.access_token ?? '';
-    if (!apiKey) {
-      console.error('[provisioning] Chatwoot sign_up: no access_token in response');
+    const account = await r1.json() as { id?: number };
+    if (!r1.ok || !account.id) {
+      console.error(`[provisioning] Chatwoot create account failed: ${r1.status} ${JSON.stringify(account)}`);
       return null;
     }
+    const accountId = account.id;
+    console.log(`[provisioning] Chatwoot account created: id=${accountId} name=${name}`);
 
-    // Get account_id from profile (sign_up may or may not include it directly)
-    let accountId = data.data?.account_id ?? data.data?.accounts?.[0]?.id;
-    if (!accountId) {
-      const profileR = await fetch(`${cwUrl}/api/v1/profile`, {
-        headers: { 'api_access_token': apiKey },
-      });
-      if (profileR.ok) {
-        const profile = await profileR.json() as { account_id?: number };
-        accountId = profile.account_id;
-      }
-    }
-
-    if (!accountId) {
-      console.error('[provisioning] Chatwoot: could not determine account_id after sign_up');
+    // Step 2: create admin user for this tenant
+    const password = generatePassword();
+    const r2 = await fetch(`${cwUrl}/platform/api/v1/users`, {
+      method: 'POST',
+      headers: platHeaders,
+      body: JSON.stringify({ name, email, password, password_confirmation: password }),
+    });
+    const user = await r2.json() as { id?: number; access_token?: string };
+    if (!r2.ok || !user.id) {
+      console.error(`[provisioning] Chatwoot create user failed: ${r2.status} ${JSON.stringify(user)}`);
       return null;
     }
+    const apiKey = user.access_token ?? '';
+    console.log(`[provisioning] Chatwoot user created: id=${user.id} email=${email}`);
 
-    console.log(`[provisioning] Chatwoot account created: accountId=${accountId} email=${email}`);
-    return { accountId: Number(accountId), apiKey, password };
+    // Step 3: add user to account as administrator
+    const r3 = await fetch(`${cwUrl}/platform/api/v1/accounts/${accountId}/account_users`, {
+      method: 'POST',
+      headers: platHeaders,
+      body: JSON.stringify({ user_id: user.id, role: 'administrator' }),
+    });
+    if (!r3.ok) {
+      console.error(`[provisioning] Chatwoot add user to account failed: ${r3.status}`);
+    }
+
+    // Step 4: get SSO login link (no password needed — customer clicks link)
+    const r4 = await fetch(`${cwUrl}/platform/api/v1/users/${user.id}/login`, {
+      headers: platHeaders,
+    });
+    const sso = await r4.json() as { url?: string };
+    const ssoUrl = sso.url ?? `${cwUrl}/app/login`;
+    console.log(`[provisioning] Chatwoot SSO link generated for user ${user.id}`);
+
+    return { accountId, apiKey, ssoUrl };
   } catch (e) {
     console.error('[provisioning] Chatwoot account creation error:', String(e));
     return null;
