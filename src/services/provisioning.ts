@@ -684,10 +684,17 @@ export async function reprovisionAgent(agentId: string): Promise<{ ok: boolean; 
   try {
     const listRes = await fetch(`${cwUrl2}/api/v1/accounts/${cwAccountId}/webhooks`, { headers: cwHeaders });
     if (listRes.ok) {
-      const whData = await listRes.json() as { webhooks?: Array<{ id: number; url: string }> } | { payload?: Array<{ id: number; url: string }> };
-      const webhooks: Array<{ id: number; url: string }> = (whData as { webhooks?: Array<{ id: number; url: string }> }).webhooks
-        ?? (whData as { payload?: Array<{ id: number; url: string }> }).payload
-        ?? [];
+      // Chatwoot returns { payload: { webhooks: [...] } }
+      const whData = await listRes.json() as {
+        payload?: { webhooks?: Array<{ id: number; url: string }> } | Array<{ id: number; url: string }>;
+        webhooks?: Array<{ id: number; url: string }>;
+      };
+      const nested = whData.payload;
+      const webhooks: Array<{ id: number; url: string }> = Array.isArray(nested)
+        ? nested
+        : Array.isArray((nested as { webhooks?: unknown })?.webhooks)
+          ? (nested as { webhooks: Array<{ id: number; url: string }> }).webhooks
+          : Array.isArray(whData.webhooks) ? whData.webhooks : [];
       const existing = webhooks.find(w => w.url === cwWebhookUrl);
       if (existing) {
         results.chatwoot_webhook = `already registered id=${existing.id}`;
