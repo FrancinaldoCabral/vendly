@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Card, Typography, Spin, Result, Alert, Form, Input, Button } from 'antd';
-import { CommentOutlined, SendOutlined } from '@ant-design/icons';
+import { CommentOutlined } from '@ant-design/icons';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 
-const { Title, Paragraph, Text } = Typography;
+const { Title, Text } = Typography;
 
 const BRAND_PRIMARY = '#0d9488';
 const BRAND_BG = '#031a18';
@@ -14,44 +14,109 @@ export default function Login() {
   const [params] = useSearchParams();
   const { login, token } = useAuth();
   const nav = useNavigate();
-  const [status, setStatus] = useState<'idle' | 'exchanging' | 'sending' | 'sent' | 'success' | 'error'>('idle');
-  const [error, setError] = useState('');
+  const [exchanging, setExchanging] = useState(false);
+  const [exchangeError, setExchangeError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [loginError, setLoginError] = useState('');
 
-  // Redirect if already logged in
+  // Redirect if already authenticated
   useEffect(() => {
     if (token) nav('/agents', { replace: true });
   }, [token, nav]);
 
-  // Exchange magic token from URL
+  // Exchange magic-link token from URL (backward compat)
   useEffect(() => {
     const magicToken = params.get('token');
     if (!magicToken) return;
-
-    setStatus('exchanging');
+    setExchanging(true);
     api.exchangeMagicToken(magicToken)
-      .then(({ token: sessionToken }) => {
-        login(sessionToken);
-        setStatus('success');
-        setTimeout(() => nav('/agents', { replace: true }), 1200);
-      })
-      .catch((e: Error) => {
-        setError(e.message);
-        setStatus('error');
-      });
+      .then(({ token: t }) => { login(t); nav('/agents', { replace: true }); })
+      .catch((e: Error) => { setExchangeError(e.message); setExchanging(false); });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function handleRequestLink({ email }: { email: string }) {
-    setStatus('sending');
-    setError('');
+  async function handleLogin({ email, password }: { email: string; password: string }) {
+    setSubmitting(true);
+    setLoginError('');
     try {
-      await api.requestMagicLink(email.trim().toLowerCase());
-      setStatus('sent');
+      const { token: t } = await api.login(email.trim(), password);
+      login(t);
+      nav('/agents', { replace: true });
     } catch (e) {
-      setError((e as Error).message);
-      setStatus('error');
+      setLoginError((e as Error).message);
+      setSubmitting(false);
     }
   }
 
+  // Exchanging magic token state
+  if (exchanging) {
+    return (
+      <LoginShell>
+        <div style={{ textAlign: 'center', padding: '16px 0' }}>
+          <Spin size="large" />
+          <Text type="secondary" style={{ display: 'block', marginTop: 16 }}>Autenticando…</Text>
+        </div>
+      </LoginShell>
+    );
+  }
+
+  if (exchangeError) {
+    return (
+      <LoginShell>
+        <Alert type="error" message="Link inválido ou expirado" description={exchangeError} showIcon />
+      </LoginShell>
+    );
+  }
+
+  return (
+    <LoginShell>
+      {loginError && (
+        <Alert
+          type="error"
+          message={loginError}
+          showIcon
+          closable
+          onClose={() => setLoginError('')}
+          style={{ marginBottom: 20 }}
+        />
+      )}
+      <Form layout="vertical" onFinish={handleLogin} requiredMark={false}>
+        <Form.Item
+          name="email"
+          label="Email"
+          rules={[{ required: true, message: 'Informe seu email' }, { type: 'email', message: 'Email inválido' }]}
+        >
+          <Input size="large" placeholder="seu@email.com" type="email" autoComplete="email" autoFocus />
+        </Form.Item>
+        <Form.Item
+          name="password"
+          label="Senha"
+          rules={[{ required: true, message: 'Informe sua senha' }]}
+          style={{ marginBottom: 24 }}
+        >
+          <Input.Password size="large" placeholder="••••••••" autoComplete="current-password" />
+        </Form.Item>
+        <Button
+          type="primary"
+          htmlType="submit"
+          block
+          size="large"
+          loading={submitting}
+          style={{ background: BRAND_PRIMARY, borderColor: BRAND_PRIMARY }}
+        >
+          Entrar
+        </Button>
+      </Form>
+      <Text type="secondary" style={{ display: 'block', fontSize: 12, marginTop: 20, textAlign: 'center' }}>
+        Use o email e senha da sua conta em{' '}
+        <a href="https://redatudo.online" target="_blank" rel="noreferrer" style={{ color: BRAND_PRIMARY }}>
+          redatudo.online
+        </a>
+      </Text>
+    </LoginShell>
+  );
+}
+
+function LoginShell({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
       minHeight: '100vh',
@@ -64,7 +129,6 @@ export default function Login() {
         style={{ width: 420, borderRadius: 16, border: 'none', boxShadow: '0 8px 40px #00000040' }}
         styles={{ body: { padding: 48 } }}
       >
-        {/* Logo */}
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <div style={{
             width: 64, height: 64, borderRadius: 16, background: BRAND_PRIMARY,
@@ -76,83 +140,7 @@ export default function Login() {
           <Title level={2} style={{ margin: 0, fontWeight: 800, color: '#111' }}>vendly</Title>
           <Text type="secondary" style={{ fontSize: 14 }}>Plataforma de agentes WhatsApp</Text>
         </div>
-
-        {/* Exchanging magic token */}
-        {(status === 'exchanging') && (
-          <div style={{ textAlign: 'center' }}>
-            <Spin size="large" />
-            <Paragraph type="secondary" style={{ marginTop: 16 }}>Autenticando…</Paragraph>
-          </div>
-        )}
-
-        {/* Login success */}
-        {status === 'success' && (
-          <Result status="success" title="Acesso autorizado!" subTitle="Redirecionando para o dashboard…" />
-        )}
-
-        {/* Link sent */}
-        {status === 'sent' && (
-          <Result
-            status="success"
-            title="Link enviado!"
-            subTitle="Verifique seu email e clique no link para acessar o painel. O link expira em 7 dias."
-          />
-        )}
-
-        {/* Error state */}
-        {status === 'error' && (
-          <>
-            <Alert
-              type="error"
-              message="Erro"
-              description={error || 'Tente novamente ou entre em contato com o suporte.'}
-              showIcon
-              style={{ marginBottom: 20 }}
-            />
-            <Button block onClick={() => setStatus('idle')}>Tentar novamente</Button>
-          </>
-        )}
-
-        {/* Email form (idle or sending) */}
-        {(status === 'idle' || status === 'sending') && (
-          <>
-            <Paragraph type="secondary" style={{ marginBottom: 20, textAlign: 'center' }}>
-              Digite seu email para receber o link de acesso.
-            </Paragraph>
-            <Form layout="vertical" onFinish={handleRequestLink}>
-              <Form.Item
-                name="email"
-                rules={[
-                  { required: true, message: 'Informe seu email' },
-                  { type: 'email', message: 'Email inválido' },
-                ]}
-              >
-                <Input
-                  size="large"
-                  placeholder="seu@email.com"
-                  type="email"
-                  autoComplete="email"
-                  autoFocus
-                />
-              </Form.Item>
-              <Button
-                type="primary"
-                htmlType="submit"
-                block
-                size="large"
-                icon={<SendOutlined />}
-                loading={status === 'sending'}
-                style={{ background: BRAND_PRIMARY, borderColor: BRAND_PRIMARY }}
-              >
-                Enviar link de acesso
-              </Button>
-            </Form>
-            <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 20, textAlign: 'center', marginBottom: 0 }}>
-              Apenas assinantes do plano Vendly têm acesso.{' '}
-              <a href={`mailto:suporte@vendly.chat`} style={{ color: BRAND_PRIMARY }}>suporte@vendly.chat</a>
-            </Paragraph>
-          </>
-        )}
+        {children}
       </Card>
     </div>
   );

@@ -66,4 +66,8 @@ export const config = {
     consumerSecret: process.env.WC_CONSUMER_SECRET ?? '',
     subscriptionProductId: parseInt(process.env.WC_SUBSCRIPTION_PRODUCT_ID ?? '36779', 10),
   },
+  wordpress: {
+    // Same site as WooCommerce — JWT Auth plugin endpoint
+    url: process.env.WP_URL ?? process.env.WC_URL ?? '',
+  },
 };
