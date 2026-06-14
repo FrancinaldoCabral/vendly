@@ -19,10 +19,12 @@ import {
 const DEDUP_TTL = 120; // seconds
 const EV_PROC_TTL = 30; // seconds — how long Evolution "claimed" a message
 
-// ── Contact filter (blacklist / whitelist) ──────────────────────────────────
-// Cached in Redis as contact_filter:{instance} = { mode, contacts[], groups[] }
-// (ported from the original stack-mcp businesses model). Default: empty blacklist
-// → everyone passes.
+// ── Contact filter (blacklist / whitelist) + multi-agent routing ─────────────
+// One WhatsApp connection (Evolution instance) can be shared by many agents.
+// Each agent has its own contactFilter. For an incoming chat we pick the FIRST
+// agent (by priority) whose filter lets the chat through. Default filter = empty
+// blacklist → that agent responds to everything (the catch-all). This is how a
+// client models their business (e.g. livraeats: restaurant agent + driver agent).
 
 interface ContactFilter {
   mode: 'blacklist' | 'whitelist';
@@ -30,24 +32,26 @@ interface ContactFilter {
   groups: string[];
 }
 
-/**
- * Decide whether a message from `senderPhone` in chat `jid` should be handled,
- * given the instance's contact filter. Groups are matched by group JID, direct
- * chats by phone number. Empty blacklist → always pass; empty whitelist → block.
- */
-async function passesContactFilter(instance: string, jid: string, senderPhone: string): Promise<boolean> {
-  try {
-    const raw = await getRedis().get(`contact_filter:${instance}`);
-    if (!raw) return true; // no filter configured
-    const f = JSON.parse(raw) as ContactFilter;
-    const isGroup = jid.endsWith('@g.us');
-    const phone = senderPhone.replace(/\D/g, '');
-    const listed = isGroup ? f.groups.includes(jid) : f.contacts.includes(phone);
-    if (f.mode === 'whitelist') return listed; // only listed allowed
-    return !listed; // blacklist: listed are blocked
-  } catch {
-    return true; // never block on filter errors
-  }
+interface RoutableAgent {
+  _id: string;
+  tenantId: string;
+  priority?: number;
+  contactFilter?: Partial<ContactFilter>;
+}
+
+/** Does this agent's filter let a message from `senderPhone` in chat `jid` through? */
+function agentClaims(agent: RoutableAgent, jid: string, senderPhone: string): boolean {
+  const f = agent.contactFilter ?? {};
+  const mode = f.mode === 'whitelist' ? 'whitelist' : 'blacklist';
+  const isGroup = jid.endsWith('@g.us');
+  const phone = senderPhone.replace(/\D/g, '');
+  const listed = isGroup ? (f.groups ?? []).includes(jid) : (f.contacts ?? []).includes(phone);
+  return mode === 'whitelist' ? listed : !listed;
+}
+
+/** Pick the owning agent for a chat among all agents on a connection (priority order). */
+function routeAgent<T extends RoutableAgent>(agents: T[], jid: string, senderPhone: string): T | null {
+  return agents.find(a => agentClaims(a, jid, senderPhone)) ?? null;
 }
 
 // ── Chatwoot webhook payload shapes ─────────────────────────────────────────
@@ -125,21 +129,47 @@ function extractMedia(message: ChatwootMessage): { mediaUrl?: string; mediaType?
 // ── Chatwoot webhook route ───────────────────────────────────────────────────
 
 export function registerWebhookRoute(router: Router): void {
-  router.post('/webhook/chatwoot/:agentId', async (req: Request, res: Response) => {
+  // :subjectId is a connectionId (current) or a legacy agentId (older provisions).
+  router.post('/webhook/chatwoot/:subjectId', async (req: Request, res: Response) => {
     res.status(200).json({ ok: true });
 
-    const { agentId } = req.params;
+    const { subjectId } = req.params;
     const body = req.body as ChatwootPayload;
 
     try {
-      await handleChatwootWebhook(agentId, body);
+      await handleChatwootWebhook(subjectId, body);
     } catch (e) {
-      console.error(`[webhook] Error agentId=${agentId}:`, String(e));
+      console.error(`[webhook] Error subjectId=${subjectId}:`, String(e));
     }
   });
 }
 
-async function handleChatwootWebhook(agentId: string, payload: ChatwootPayload): Promise<void> {
+/** Resolve the candidate agents for a Chatwoot webhook subject (connection or legacy agent). */
+async function resolveChatwootAgents(subjectId: string): Promise<Array<RoutableAgent & { chatwootInboxId?: number; status?: string }>> {
+  const db = await getDb();
+  // Preferred: subject is a connection → all its agents
+  const conn = await db.collection('connections').findOne(
+    { _id: subjectId } as Record<string, unknown>,
+    { projection: { _id: 1 } },
+  );
+  if (conn) {
+    const agents = (await db.collection('agents').find(
+      { connectionId: subjectId } as Record<string, unknown>,
+      { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, chatwootInboxId: 1, status: 1 } },
+    ).toArray()) as unknown as Array<RoutableAgent & { chatwootInboxId?: number; status?: string }>;
+    return agents
+      .filter(a => a.status !== 'paused')
+      .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || String(a._id).localeCompare(String(b._id)));
+  }
+  // Legacy: subject is an agent id
+  const agent = (await db.collection('agents').findOne(
+    { _id: subjectId } as Record<string, unknown>,
+    { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, chatwootInboxId: 1, status: 1 } },
+  )) as unknown as (RoutableAgent & { chatwootInboxId?: number; status?: string }) | null;
+  return agent ? [agent] : [];
+}
+
+async function handleChatwootWebhook(subjectId: string, payload: ChatwootPayload): Promise<void> {
   if (payload.event !== 'message_created') return;
   if (payload.message?.message_type !== 'incoming') return;
 
@@ -148,18 +178,27 @@ async function handleChatwootWebhook(agentId: string, payload: ChatwootPayload):
 
   if (payload.conversation?.assignee) return;
 
-  // Check if inbox_id matches this agent
+  const candidates = await resolveChatwootAgents(subjectId);
+  if (candidates.length === 0) {
+    console.warn(`[webhook] no agents for subjectId=${subjectId}`);
+    return;
+  }
+
+  // Route by sender → first agent whose filter claims this chat
+  const { senderPhone, senderName, contactJid } = extractSender(payload);
+  const owner = routeAgent(candidates, contactJid, senderPhone);
+  if (!owner) {
+    console.log(`[webhook] no agent claims chat subjectId=${subjectId} jid=${contactJid} sender=${senderPhone}`);
+    return;
+  }
+  const agentId = String(owner._id);
+  const tenantId = owner.tenantId;
+
+  // Inbox guard: drop if the conversation's inbox doesn't belong to the owner's connection
   const inboxId = payload.conversation?.inbox_id;
-  if (inboxId) {
-    const db = await getDb();
-    const agentDoc = await db.collection('agents').findOne(
-      { _id: agentId } as Record<string, unknown>,
-      { projection: { chatwootInboxId: 1 } },
-    ) as { chatwootInboxId?: number } | null;
-    if (agentDoc?.chatwootInboxId && agentDoc.chatwootInboxId !== inboxId) {
-      console.log(`[webhook] inbox_id mismatch — agentId=${agentId} expected=${agentDoc.chatwootInboxId} got=${inboxId} — skipping`);
-      return;
-    }
+  if (inboxId && owner.chatwootInboxId && owner.chatwootInboxId !== inboxId) {
+    console.log(`[webhook] inbox_id mismatch subjectId=${subjectId} expected=${owner.chatwootInboxId} got=${inboxId} — skipping`);
+    return;
   }
 
   const redis = getRedis();
@@ -184,20 +223,6 @@ async function handleChatwootWebhook(agentId: string, payload: ChatwootPayload):
     console.log(`[webhook] DEDUP skip agentId=${agentId} convId=${conversationId} msgId=${msgId}`);
     return;
   }
-
-  const db = await getDb();
-  const agentDoc = await db.collection<{ _id: string; tenantId?: string }>('agents').findOne(
-    { _id: agentId },
-    { projection: { tenantId: 1 } },
-  );
-
-  const tenantId = agentDoc?.tenantId ?? '';
-  if (!tenantId) {
-    console.error(`[webhook] tenantId not found for agentId=${agentId}`);
-    return;
-  }
-
-  const { senderPhone, senderName, contactJid } = extractSender(payload);
   const { mediaUrl, mediaType } = extractMedia(payload.message!);
   const text = payload.message?.content ?? '';
   const waExternalId = payload.message?.content_attributes?.in_reply_to_external_id ?? null;
@@ -246,17 +271,21 @@ export async function handleEvolutionMessageWebhook(
   const redis = getRedis();
   const db = await getDb();
 
-  // Look up agent once for this instance
-  const agentDoc = await db.collection<{ _id: string; tenantId?: string; chatwootInboxId?: number }>('agents').findOne(
+  // Load ALL agents listening on this connection, in priority order (then age).
+  const agents = (await db.collection('agents').find(
     { evolutionInstance: instance } as Record<string, unknown>,
-    { projection: { _id: 1, tenantId: 1 } },
-  );
-  if (!agentDoc?.tenantId) {
+    { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, status: 1 } },
+  ).toArray()) as unknown as Array<RoutableAgent & { status?: string }>;
+  // Only active/pending agents participate; sort by priority asc, stable by id.
+  const ordered = agents
+    .filter(a => a.status !== 'paused')
+    .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || String(a._id).localeCompare(String(b._id)));
+
+  if (ordered.length === 0) {
     console.warn(`[ev-webhook] no agent found for instance=${instance}`);
     return;
   }
-  const agentId = String(agentDoc._id);
-  const tenantId = agentDoc.tenantId;
+  const tenantId = ordered[0].tenantId;
 
   for (const msg of rawMsgs) {
     const key = (msg.key ?? {}) as Record<string, unknown>;
@@ -282,11 +311,13 @@ export async function handleEvolutionMessageWebhook(
     const senderPhone = senderJid.replace(/@[^@]+$/, '').replace(/\D/g, '');
     const pushName = String(msg.pushName ?? '');
 
-    // Blacklist / whitelist enforcement (before any expensive media work)
-    if (!(await passesContactFilter(instance, jid, senderPhone))) {
-      console.log(`[ev-webhook] BLOCKED by contact filter instance=${instance} jid=${jid} sender=${senderPhone}`);
+    // Route to the owning agent (first whose blacklist/whitelist lets this chat through).
+    const owner = routeAgent(ordered, jid, senderPhone);
+    if (!owner) {
+      console.log(`[ev-webhook] no agent claims chat instance=${instance} jid=${jid} sender=${senderPhone}`);
       continue;
     }
+    const agentId = String(owner._id);
 
     // Mark as "processed by Evolution path" so Chatwoot webhook skips it
     await redis.set(`ev_proc:${msgId}`, '1', 'EX', EV_PROC_TTL);

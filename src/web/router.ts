@@ -5,6 +5,7 @@ import { config } from '../config.js';
 import { checkWcSubscription, findOrCreateTenant, sendMagicLink, reprovisionAgent, getChatwootSsoUrl } from '../services/provisioning.js';
 import { tenantsRouter } from './routes/tenants.js';
 import { agentsRouter } from './routes/agents.js';
+import { connectionsRouter } from './routes/connections.js';
 import { knowledgeRouter } from './routes/knowledge.js';
 import { scheduledPostsRouter } from './routes/scheduled_posts.js';
 import { conversationsRouter } from './routes/conversations.js';
@@ -269,12 +270,16 @@ apiRouter.post('/admin/reset', requireAuth, requireAdmin, async (_req, res) => {
     const evUrl = config.evolution.url.replace(/\/$/, '');
     const evHeaders = { apikey: config.evolution.apiKey };
 
-    // 0. Collect agent instances from MongoDB BEFORE dropping DB
+    // 0. Collect instances (agents + connections) from MongoDB BEFORE dropping DB
     let agentInstances: string[] = [];
     try {
       const db = await getDb();
-      const agents = await db.collection('agents').find({}, { projection: { evolutionInstance: 1 } }).toArray();
-      agentInstances = agents.map(a => String((a as Record<string, unknown>).evolutionInstance ?? '')).filter(Boolean);
+      const [agents, connections] = await Promise.all([
+        db.collection('agents').find({}, { projection: { evolutionInstance: 1 } }).toArray(),
+        db.collection('connections').find({}, { projection: { evolutionInstance: 1 } }).toArray(),
+      ]);
+      const all = [...agents, ...connections].map(a => String((a as Record<string, unknown>).evolutionInstance ?? '')).filter(Boolean);
+      agentInstances = Array.from(new Set(all));
     } catch (e) { results.evolution_list = `warn: ${String(e)}`; }
 
     // 1. Delete Evolution instances (logout + delete so they stop sending webhooks)
@@ -334,6 +339,7 @@ apiRouter.post('/admin/reset', requireAuth, requireAdmin, async (_req, res) => {
 // All routes below require auth
 apiRouter.use(requireAuth);
 apiRouter.use('/tenants', tenantsRouter);
+apiRouter.use('/connections', connectionsRouter);
 apiRouter.use('/agents', agentsRouter);
 apiRouter.use('/knowledge', knowledgeRouter);
 apiRouter.use('/scheduled_posts', scheduledPostsRouter);

@@ -223,16 +223,16 @@ async function main() {
 
       try {
         const db = await getDb();
-        const result = await db.collection('agents').findOneAndUpdate(
+        // Activate the connection (new model) and any agents listening on it.
+        await db.collection('connections').updateMany(
+          { evolutionInstance: instance },
+          { $set: { status: 'active', updatedAt: new Date() } },
+        );
+        const result = await db.collection('agents').updateMany(
           { evolutionInstance: instance, status: 'pending_qr' },
           { $set: { status: 'active', updatedAt: new Date() } },
-          { returnDocument: 'after' },
         );
-        if (result) {
-          console.log(`[evolution-webhook] Agent activated: agentId=${result._id} instance=${instance}`);
-        } else {
-          console.log(`[evolution-webhook] No pending_qr agent found for instance=${instance}`);
-        }
+        console.log(`[evolution-webhook] Connected instance=${instance}: ${result.modifiedCount} agent(s) activated`);
       } catch (e) {
         console.error(`[evolution-webhook] DB update failed:`, String(e));
       }

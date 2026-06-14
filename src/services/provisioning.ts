@@ -39,20 +39,42 @@ export interface ProvisionAgentInput {
   systemPrompt: string;
   model?: string;
   tools?: string[];
+  /** Attach to an existing WhatsApp connection. If omitted, a new one is created (1:1 legacy). */
+  connectionId?: string;
+}
+
+/**
+ * A WhatsApp connection (Evolution instance + Chatwoot inbox) owned by the negócio
+ * (tenant). One connection can be shared by many agents — each agent filters which
+ * chats it handles via its contactFilter. This is how the livraeats model works:
+ * one number, multiple agents.
+ */
+export interface ConnectionDoc {
+  _id: string;
+  tenantId: string;
+  name: string;
+  evolutionInstance: string;
+  chatwootInboxId?: number;
+  status: 'pending_qr' | 'active' | 'paused';
+  createdAt: Date;
 }
 
 export interface AgentDoc {
   _id: string; // string ID (not ObjectId)
   tenantId: string;
+  connectionId: string;           // which WhatsApp connection this agent listens on
   name: string;
-  evolutionInstance: string;
-  chatwootInboxId?: number;
+  evolutionInstance: string;      // denormalized from the connection (keeps message flow simple)
+  chatwootInboxId?: number;       // denormalized from the connection
   systemPrompt: string;
   model: string;
+  temperature?: number;
+  maxIter?: number;
   tools: string[];
   customApis: unknown[];
   groupConfig: { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean };
   contactFilter: { mode: 'blacklist' | 'whitelist'; contacts: string[]; groups: string[] };
+  priority: number;               // lower = checked first when a connection is shared
   status: 'pending_qr' | 'active' | 'paused';
   createdAt: Date;
 }
@@ -255,62 +277,109 @@ export async function provisionTenant(input: ProvisionTenantInput): Promise<Tena
 
 // ── Agent provisioning ───────────────────────────────────────────────────────
 
-export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentDoc & { qrCodeUrl: string }> {
+/** Ensure the tenant has a Chatwoot account, creating/healing it if needed. Returns creds. */
+async function ensureTenantChatwoot(tenantId: string): Promise<{ accountId: number; apiKey: string }> {
   const db = await getDb();
-  const agentId = generateId();
-  const instance = `agent_${agentId}`;
-
-  // 1. Load tenant to get their Chatwoot credentials; heal if missing (WooCommerce path)
-  let tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: input.tenantId });
-  if (!tenant) throw new Error(`Tenant ${input.tenantId} not found.`);
+  let tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: tenantId });
+  if (!tenant) throw new Error(`Tenant ${tenantId} not found.`);
 
   if (!tenant.chatwoot) {
-    console.log(`[provisioning] provisionAgent: tenant ${input.tenantId} missing Chatwoot — creating now`);
-    const cwAccount = await createChatwootAccount(tenant.email, tenant.name, input.tenantId);
-    if (!cwAccount) throw new Error(`Cannot create agent: failed to create Chatwoot account for tenant ${input.tenantId}.`);
+    console.log(`[provisioning] tenant ${tenantId} missing Chatwoot — creating now`);
+    const cwAccount = await createChatwootAccount(tenant.email, tenant.name, tenantId);
+    if (!cwAccount) throw new Error(`Cannot provision: failed to create Chatwoot account for tenant ${tenantId}.`);
     await db.collection<TenantDoc>('tenants').updateOne(
-      { _id: input.tenantId } as Record<string, unknown>,
+      { _id: tenantId } as Record<string, unknown>,
       { $set: { chatwoot: { accountId: cwAccount.accountId, userId: cwAccount.userId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl } } },
     );
     tenant = { ...tenant, chatwoot: { accountId: cwAccount.accountId, userId: cwAccount.userId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl } };
-    console.log(`[provisioning] Chatwoot healed for tenant ${input.tenantId}: accountId=${cwAccount.accountId}`);
   }
+  const cw = tenant.chatwoot as NonNullable<TenantDoc['chatwoot']>;
+  return { accountId: cw.accountId, apiKey: cw.apiKey };
+}
 
-  // tenant.chatwoot is guaranteed non-null here (created/healed above, or pre-existing)
-  const tenantCw = tenant.chatwoot as NonNullable<TenantDoc['chatwoot']>;
-  const { accountId: cwAccountId, apiKey: cwApiKey } = tenantCw;
+/**
+ * Create a WhatsApp connection for a tenant: Evolution instance + Chatwoot inbox.
+ * Agents are attached to a connection separately.
+ */
+export async function provisionConnection(
+  tenantId: string,
+  name: string,
+): Promise<ConnectionDoc & { qrCodeUrl: string }> {
+  const db = await getDb();
+  const connectionId = generateId();
+  const instance = `conn_${connectionId}`;
 
-  // 2. Create Evolution instance + register webhook for connection updates
+  const { accountId: cwAccountId, apiKey: cwApiKey } = await ensureTenantChatwoot(tenantId);
+
+  // Evolution instance + webhook
   const evolutionWebhookUrl = `${config.app.url}/webhook/evolution/${instance}`;
   await createEvolutionInstance(instance, evolutionWebhookUrl);
 
-  // 3. Create Chatwoot inbox using tenant's own account
-  const inboxId = await createChatwootInbox(instance, input.name, agentId, cwAccountId, cwApiKey);
+  // Chatwoot inbox (one per connection — all agents on this number share the CRM stream)
+  const inboxId = await createChatwootInbox(instance, name, connectionId, cwAccountId, cwApiKey);
 
-  // 4. Create Qdrant collection
+  const connection: ConnectionDoc = {
+    _id: connectionId,
+    tenantId,
+    name,
+    evolutionInstance: instance,
+    chatwootInboxId: inboxId ?? undefined,
+    status: 'pending_qr',
+    createdAt: new Date(),
+  };
+  await db.collection<ConnectionDoc>('connections').insertOne(connection);
+
+  const qrCodeUrl = `${config.evolution.url}/instance/qrcode/${instance}`;
+  console.log(`[provisioning] Connection created: ${connectionId} instance=${instance} chatwootInbox=${inboxId}`);
+  return { ...connection, qrCodeUrl };
+}
+
+export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentDoc & { qrCodeUrl: string }> {
+  const db = await getDb();
+  const agentId = generateId();
+
+  // 1. Resolve the connection: use the given one, or create a fresh one (legacy 1:1).
+  let connection: ConnectionDoc | null = null;
+  if (input.connectionId) {
+    connection = await db.collection<ConnectionDoc>('connections').findOne({
+      _id: input.connectionId, tenantId: input.tenantId,
+    });
+    if (!connection) throw new Error(`Connection ${input.connectionId} not found for tenant ${input.tenantId}.`);
+  } else {
+    connection = await provisionConnection(input.tenantId, input.name);
+  }
+
+  // 2. Per-agent Qdrant collection (each agent keeps its own knowledge base)
   await createQdrantCollection(agentId);
 
-  // 5. Save agent to MongoDB
+  // 3. Agent priority = position among existing agents on the same connection
+  const siblings = await db.collection<AgentDoc>('agents').countDocuments({
+    tenantId: input.tenantId, connectionId: connection._id,
+  });
+
+  // 4. Save agent (denormalize instance + inbox from the connection)
   const agent: AgentDoc = {
     _id: agentId,
     tenantId: input.tenantId,
+    connectionId: connection._id,
     name: input.name,
-    evolutionInstance: instance,
-    chatwootInboxId: inboxId ?? undefined,
+    evolutionInstance: connection.evolutionInstance,
+    chatwootInboxId: connection.chatwootInboxId,
     systemPrompt: input.systemPrompt,
     model: input.model ?? config.openrouter.chatModel,
     tools: input.tools ?? ['evolution', 'chatwoot'],
     customApis: [],
     groupConfig: { respondToMentions: true, respondToReplies: true, respondToAll: false },
     contactFilter: { mode: 'blacklist', contacts: [], groups: [] }, // default: empty blacklist → everyone passes
-    status: 'pending_qr',
+    priority: siblings, // appended after existing agents
+    status: connection.status, // shares the connection's connection-state
     createdAt: new Date(),
   };
 
   await db.collection<AgentDoc>('agents').insertOne(agent);
 
-  const qrCodeUrl = `${config.evolution.url}/instance/qrcode/${instance}`;
-  console.log(`[provisioning] Agent created: ${agentId} instance=${instance} chatwootInbox=${inboxId}`);
+  const qrCodeUrl = `${config.evolution.url}/instance/qrcode/${connection.evolutionInstance}`;
+  console.log(`[provisioning] Agent created: ${agentId} connection=${connection._id} instance=${connection.evolutionInstance}`);
   return { ...agent, qrCodeUrl };
 }
 
@@ -327,50 +396,7 @@ export async function deprovisionAgent(agentId: string, tenantId: string): Promi
     return;
   }
 
-  const evUrl = config.evolution.url.replace(/\/$/, '');
-  const evHeaders = { apikey: config.evolution.apiKey };
-
-  // 1. Logout Evolution instance (graceful disconnect, ignore errors)
-  try {
-    const r = await fetch(`${evUrl}/instance/logout/${agent.evolutionInstance}`, {
-      method: 'DELETE', headers: evHeaders,
-    });
-    console.log(`[provisioning] Evolution logout ${agent.evolutionInstance}: ${r.status}`);
-  } catch (e) {
-    console.warn(`[provisioning] Evolution logout failed (continuing):`, String(e));
-  }
-
-  // 2. Delete Evolution instance — verified: DELETE /instance/delete/{name} → 200 {"status":"SUCCESS"}
-  try {
-    const r = await fetch(`${evUrl}/instance/delete/${agent.evolutionInstance}`, {
-      method: 'DELETE', headers: evHeaders,
-    });
-    const body = await r.text();
-    console.log(`[provisioning] Evolution delete ${agent.evolutionInstance}: ${r.status} ${body.slice(0, 200)}`);
-  } catch (e) {
-    console.error(`[provisioning] Evolution delete failed:`, String(e));
-  }
-
-  // 3. Delete Chatwoot inbox using tenant's credentials
-  if (agent.chatwootInboxId) {
-    try {
-      const tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: agent.tenantId });
-      if (tenant?.chatwoot) {
-        const cwUrl = config.chatwoot.url.replace(/\/$/, '');
-        const r = await fetch(`${cwUrl}/api/v1/accounts/${tenant.chatwoot.accountId}/inboxes/${agent.chatwootInboxId}`, {
-          method: 'DELETE',
-          headers: { 'api_access_token': tenant.chatwoot.apiKey },
-        });
-        console.log(`[provisioning] Chatwoot inbox delete ${agent.chatwootInboxId}: ${r.status}`);
-      } else {
-        console.warn(`[provisioning] Tenant ${agent.tenantId} has no Chatwoot account — skipping inbox delete`);
-      }
-    } catch (e) {
-      console.error(`[provisioning] Chatwoot inbox delete failed:`, String(e));
-    }
-  }
-
-  // 4. Delete Qdrant collection
+  // 1. Delete the agent's own Qdrant collection
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (config.qdrant.apiKey) headers['api-key'] = config.qdrant.apiKey;
@@ -382,8 +408,79 @@ export async function deprovisionAgent(agentId: string, tenantId: string): Promi
     console.error(`[provisioning] Qdrant collection delete failed:`, String(e));
   }
 
+  // 2. Remove the agent doc
   await db.collection<AgentDoc>('agents').deleteOne(filter);
-  console.log(`[provisioning] Agent deprovisioned: ${agentId} instance=${agent.evolutionInstance} inbox=${agent.chatwootInboxId}`);
+
+  // 3. Tear down the WhatsApp connection ONLY if no other agent still uses it.
+  const connId = (agent as { connectionId?: string }).connectionId;
+  const sharedQuery: Record<string, unknown> = connId
+    ? { connectionId: connId }
+    : { evolutionInstance: agent.evolutionInstance };
+  const remaining = await db.collection<AgentDoc>('agents').countDocuments(sharedQuery);
+  if (remaining === 0) {
+    await teardownEvolutionAndInbox(agent.evolutionInstance, agent.chatwootInboxId, agent.tenantId);
+    if (connId) {
+      await db.collection<ConnectionDoc>('connections').deleteOne({ _id: connId });
+    }
+    console.log(`[provisioning] Connection torn down (last agent): instance=${agent.evolutionInstance}`);
+  } else {
+    console.log(`[provisioning] Connection kept (${remaining} agent(s) remain): instance=${agent.evolutionInstance}`);
+  }
+
+  console.log(`[provisioning] Agent deprovisioned: ${agentId} instance=${agent.evolutionInstance}`);
+}
+
+/** Delete a connection and its underlying Evolution instance + Chatwoot inbox (and detach agents). */
+export async function deprovisionConnection(connectionId: string, tenantId: string): Promise<void> {
+  const db = await getDb();
+  const filter: Record<string, unknown> = { _id: connectionId };
+  if (tenantId) filter.tenantId = tenantId;
+  const connection = await db.collection<ConnectionDoc>('connections').findOne(filter);
+  if (!connection) {
+    console.warn(`[provisioning] deprovisionConnection: not found ${connectionId}`);
+    return;
+  }
+  await teardownEvolutionAndInbox(connection.evolutionInstance, connection.chatwootInboxId, connection.tenantId);
+  // Detach any agents still pointing at it (they become unusable until reassigned)
+  await db.collection<AgentDoc>('agents').deleteMany({ connectionId });
+  await db.collection<ConnectionDoc>('connections').deleteOne(filter);
+  console.log(`[provisioning] Connection deprovisioned: ${connectionId} instance=${connection.evolutionInstance}`);
+}
+
+/** Shared teardown: logout + delete Evolution instance and delete the Chatwoot inbox. */
+async function teardownEvolutionAndInbox(instance: string, inboxId: number | undefined, tenantId: string): Promise<void> {
+  const evUrl = config.evolution.url.replace(/\/$/, '');
+  const evHeaders = { apikey: config.evolution.apiKey };
+
+  try {
+    const r = await fetch(`${evUrl}/instance/logout/${instance}`, { method: 'DELETE', headers: evHeaders });
+    console.log(`[provisioning] Evolution logout ${instance}: ${r.status}`);
+  } catch (e) {
+    console.warn(`[provisioning] Evolution logout failed (continuing):`, String(e));
+  }
+  try {
+    const r = await fetch(`${evUrl}/instance/delete/${instance}`, { method: 'DELETE', headers: evHeaders });
+    const body = await r.text();
+    console.log(`[provisioning] Evolution delete ${instance}: ${r.status} ${body.slice(0, 200)}`);
+  } catch (e) {
+    console.error(`[provisioning] Evolution delete failed:`, String(e));
+  }
+
+  if (inboxId) {
+    try {
+      const db = await getDb();
+      const tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: tenantId });
+      if (tenant?.chatwoot) {
+        const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+        const r = await fetch(`${cwUrl}/api/v1/accounts/${tenant.chatwoot.accountId}/inboxes/${inboxId}`, {
+          method: 'DELETE', headers: { 'api_access_token': tenant.chatwoot.apiKey },
+        });
+        console.log(`[provisioning] Chatwoot inbox delete ${inboxId}: ${r.status}`);
+      }
+    } catch (e) {
+      console.error(`[provisioning] Chatwoot inbox delete failed:`, String(e));
+    }
+  }
 }
 
 // ── Evolution ────────────────────────────────────────────────────────────────

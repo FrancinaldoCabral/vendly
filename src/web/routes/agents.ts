@@ -68,7 +68,7 @@ agentsRouter.post('/', async (req, res) => {
     if (tenantId === '__admin__' && !req.body.tenantId) {
       res.status(400).json({ error: 'tenantId required for admin' }); return;
     }
-    const { name, systemPrompt, model, tools, phone } = req.body as Record<string, unknown>;
+    const { name, systemPrompt, model, tools, phone, connectionId } = req.body as Record<string, unknown>;
     if (!name || !systemPrompt) {
       res.status(400).json({ error: 'name e systemPrompt são obrigatórios' }); return;
     }
@@ -79,6 +79,7 @@ agentsRouter.post('/', async (req, res) => {
       model: model ? String(model) : undefined,
       tools: Array.isArray(tools) ? (tools as string[]) : undefined,
       phone: phone ? String(phone) : undefined,
+      connectionId: connectionId ? String(connectionId) : undefined,
     });
     const { qrCodeUrl, ...agent } = provisioned;
     res.status(201).json({ agent, qrCodeUrl });
