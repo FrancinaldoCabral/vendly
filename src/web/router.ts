@@ -271,33 +271,59 @@ apiRouter.post('/admin/reset', requireAuth, requireAdmin, async (_req, res) => {
     const evUrl = config.evolution.url.replace(/\/$/, '');
     const evHeaders = { apikey: config.evolution.apiKey };
 
-    // 0. Collect instances (agents + connections) from MongoDB BEFORE dropping DB
-    let agentInstances: string[] = [];
+    // 0. Collect Chatwoot account IDs from MongoDB BEFORE dropping it (so we can
+    //    delete the isolated accounts and not leave orphans behind).
+    let chatwootAccountIds: number[] = [];
     try {
       const db = await getDb();
-      const [agents, connections] = await Promise.all([
-        db.collection('agents').find({}, { projection: { evolutionInstance: 1 } }).toArray(),
-        db.collection('connections').find({}, { projection: { evolutionInstance: 1 } }).toArray(),
-      ]);
-      const all = [...agents, ...connections].map(a => String((a as Record<string, unknown>).evolutionInstance ?? '')).filter(Boolean);
-      agentInstances = Array.from(new Set(all));
+      const tenants = await db.collection('tenants').find({}, { projection: { 'chatwoot.accountId': 1 } }).toArray();
+      chatwootAccountIds = tenants
+        .map(t => (t as { chatwoot?: { accountId?: number } }).chatwoot?.accountId)
+        .filter((id): id is number => typeof id === 'number');
+    } catch (e) { results.chatwoot_list = `warn: ${String(e)}`; }
+
+    // 1. Delete EVERY Evolution instance — list directly from Evolution so orphaned
+    //    instances (not present in Mongo) are cleaned too. This was the bug that left
+    //    a connected WhatsApp with no dashboard entry.
+    let instanceNames: string[] = [];
+    try {
+      const r = await fetch(`${evUrl}/instance/fetchInstances`, { headers: evHeaders });
+      if (r.ok) {
+        const list = await r.json() as Array<{ name?: string; instance?: { instanceName?: string } }>;
+        instanceNames = list.map(i => i.name ?? i.instance?.instanceName ?? '').filter(Boolean);
+      }
     } catch (e) { results.evolution_list = `warn: ${String(e)}`; }
 
-    // 1. Delete Evolution instances (logout + delete so they stop sending webhooks)
     const evDeleted: string[] = [];
     const evFailed: string[] = [];
-    for (const inst of agentInstances) {
+    for (const inst of instanceNames) {
+      const enc = encodeURIComponent(inst);
       try {
-        await fetch(`${evUrl}/instance/logout/${inst}`, { method: 'DELETE', headers: evHeaders });
-        const d = await fetch(`${evUrl}/instance/delete/${inst}`, { method: 'DELETE', headers: evHeaders });
+        await fetch(`${evUrl}/instance/logout/${enc}`, { method: 'DELETE', headers: evHeaders });
+        const d = await fetch(`${evUrl}/instance/delete/${enc}`, { method: 'DELETE', headers: evHeaders });
         if (d.ok) evDeleted.push(inst); else evFailed.push(inst);
       } catch { evFailed.push(inst); }
     }
-    results.evolution = evDeleted.length
-      ? `deleted: ${evDeleted.join(', ')}${evFailed.length ? ` | failed: ${evFailed.join(', ')}` : ''}`
-      : agentInstances.length ? `failed to delete all` : 'no instances';
+    results.evolution = instanceNames.length
+      ? `deleted: ${evDeleted.join(', ') || '—'}${evFailed.length ? ` | failed: ${evFailed.join(', ')}` : ''}`
+      : 'no instances';
 
-    // 2. Drop MongoDB vendly database
+    // 2. Delete Chatwoot accounts via Platform API (removes their conversations too)
+    const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+    const cwDeleted: number[] = [];
+    if (config.chatwoot.platformKey && chatwootAccountIds.length) {
+      for (const id of chatwootAccountIds) {
+        try {
+          const r = await fetch(`${cwUrl}/platform/api/v1/accounts/${id}`, {
+            method: 'DELETE', headers: { 'api_access_token': config.chatwoot.platformKey },
+          });
+          if (r.ok) cwDeleted.push(id);
+        } catch { /* ignore */ }
+      }
+    }
+    results.chatwoot = chatwootAccountIds.length ? `deleted accounts: ${cwDeleted.join(', ') || '—'}` : 'no accounts';
+
+    // 3. Drop MongoDB vendly database
     try {
       const client = await getClient();
       await client.db('vendly').dropDatabase();
