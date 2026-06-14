@@ -277,19 +277,23 @@ async function createEvolutionInstance(instance: string, webhookUrl: string): Pr
   }
 
   // Register webhook so Evolution notifies us on CONNECTION_UPDATE
+  // Evolution v2.3+ requires the payload wrapped in a "webhook" key
   try {
     const wRes = await fetch(`${evUrl}/webhook/set/${instance}`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        url: webhookUrl,
-        enabled: true,
-        webhookBase64: false,
-        webhookByEvents: false,
-        events: ['CONNECTION_UPDATE', 'QRCODE_UPDATED'],
+        webhook: {
+          url: webhookUrl,
+          enabled: true,
+          webhookBase64: false,
+          webhookByEvents: false,
+          events: ['CONNECTION_UPDATE', 'QRCODE_UPDATED'],
+        },
       }),
     });
-    console.log(`[provisioning] Evolution webhook set ${instance}: ${wRes.status}`);
+    const wBody = await wRes.text();
+    console.log(`[provisioning] Evolution webhook set ${instance}: ${wRes.status} ${wBody.slice(0, 200)}`);
   } catch (e) {
     console.warn(`[provisioning] Evolution webhook set failed (non-fatal):`, String(e));
   }
@@ -301,83 +305,73 @@ async function createChatwootInbox(instance: string, name: string, agentId: stri
   const webhookUrl = `${config.app.url}/webhook/chatwoot/${agentId}`;
   const acctId = config.chatwoot.accountId;
   const evUrl = config.evolution.url.replace(/\/$/, '');
+  const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+  const cwHeaders = { 'Content-Type': 'application/json', 'api_access_token': config.chatwoot.apiKey };
 
-  // Strategy 1: Evolution's built-in Chatwoot integration
-  // This links the WhatsApp instance directly to a Chatwoot inbox (messages flow automatically)
+  // Step 1: snapshot existing inbox IDs so we can identify the new one after creation
+  let existingIds = new Set<number>();
   try {
-    const r = await fetch(`${evUrl}/chatwoot/create/${instance}`, {
+    const listRes = await fetch(`${cwUrl}/api/v1/accounts/${acctId}/inboxes`, { headers: cwHeaders });
+    if (listRes.ok) {
+      const { payload } = await listRes.json() as { payload: { id: number }[] };
+      existingIds = new Set(payload.map(i => i.id));
+    }
+  } catch (e) {
+    console.warn('[provisioning] Could not list existing inboxes:', String(e));
+  }
+
+  // Step 2: call Evolution's /chatwoot/set (Evolution v2.3+)
+  // This links the WhatsApp instance to Chatwoot and creates the inbox via autoCreate
+  // Fields are camelCase in Evolution v2 (accountId, nameInbox, reopenConversation, etc.)
+  try {
+    const r = await fetch(`${evUrl}/chatwoot/set/${instance}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
       body: JSON.stringify({
         enabled: true,
-        account_id: acctId,
+        accountId: acctId,
         token: config.chatwoot.apiKey,
         url: config.chatwoot.url,
-        name_inbox: name,
-        sign_msg: false,
-        reopen_conversation: true,
-        conversation_pending: false,
-        auto_create: true,
-        webhook_url: webhookUrl,
+        nameInbox: name,
+        signMsg: false,
+        reopenConversation: true,
+        conversationPending: false,
+        autoCreate: true,
       }),
     });
 
     const rawBody = await r.text();
-    console.log(`[provisioning] Evolution Chatwoot create ${instance}: status=${r.status} body=${rawBody.slice(0, 400)}`);
+    console.log(`[provisioning] Evolution Chatwoot set ${instance}: status=${r.status} body=${rawBody.slice(0, 300)}`);
 
     if (r.ok) {
-      // Evolution v2 returns: { chatwoot: { inbox_id: N, ... } }
-      // Some builds return: { inbox: { id: N } } or { id: N }
-      type EvCwResp = {
-        chatwoot?: { inbox_id?: number };
-        inbox?: { id?: number };
-        id?: number;
-        inbox_id?: number;
-      };
-      const data = JSON.parse(rawBody) as EvCwResp;
-      const inboxId = data.chatwoot?.inbox_id ?? data.inbox?.id ?? data.id ?? data.inbox_id ?? null;
-      if (inboxId) {
-        console.log(`[provisioning] Chatwoot inbox linked via Evolution: inboxId=${inboxId}`);
-        await registerChatwootWebhook(Number(acctId), inboxId, webhookUrl);
-        return inboxId;
+      // autoCreate: true causes Chatwoot to create the inbox immediately.
+      // The /chatwoot/set response does NOT include inbox_id, so we diff the inbox list.
+      await new Promise(resolve => setTimeout(resolve, 800)); // wait for Chatwoot to process
+      const listRes2 = await fetch(`${cwUrl}/api/v1/accounts/${acctId}/inboxes`, { headers: cwHeaders });
+      if (listRes2.ok) {
+        const { payload: inboxes } = await listRes2.json() as { payload: { id: number; name: string }[] };
+        // Prefer the inbox that wasn't in the snapshot (newly created)
+        const newInbox = inboxes.find(i => !existingIds.has(i.id)) ?? inboxes.filter(i => i.name === name).sort((a, b) => b.id - a.id)[0];
+        if (newInbox) {
+          console.log(`[provisioning] Chatwoot inbox created via Evolution: id=${newInbox.id} name=${newInbox.name}`);
+          await registerChatwootWebhook(Number(acctId), webhookUrl);
+          return newInbox.id;
+        }
       }
-      console.warn(`[provisioning] Evolution Chatwoot create OK but could not extract inbox_id from response`);
+      console.warn('[provisioning] /chatwoot/set succeeded but could not find new inbox in Chatwoot list');
     }
   } catch (e) {
-    console.error(`[provisioning] Evolution Chatwoot create error:`, String(e));
-  }
-
-  // Strategy 2: Create inbox directly via Chatwoot API (fallback — no Evolution link)
-  // Warning: messages from WhatsApp won't flow automatically; Chatwoot only acts as conversation store
-  try {
-    const r2 = await fetch(`${config.chatwoot.url}/api/v1/accounts/${acctId}/inboxes`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'api_access_token': config.chatwoot.apiKey,
-      },
-      body: JSON.stringify({ channel: { type: 'api', webhook_url: webhookUrl }, name }),
-    });
-    const rawBody2 = await r2.text();
-    console.log(`[provisioning] Chatwoot direct inbox create: status=${r2.status} body=${rawBody2.slice(0, 200)}`);
-    if (r2.ok) {
-      const data2 = JSON.parse(rawBody2) as { id?: number };
-      if (data2.id) {
-        console.warn(`[provisioning] Chatwoot inbox created directly (NOT linked to Evolution): inboxId=${data2.id}`);
-        return data2.id;
-      }
-    }
-  } catch (e) {
-    console.error(`[provisioning] Chatwoot direct inbox create error:`, String(e));
+    console.error('[provisioning] Evolution Chatwoot set error:', String(e));
   }
 
   console.error(`[provisioning] Failed to create Chatwoot inbox for agent=${agentId} instance=${instance}`);
   return null;
 }
 
-async function registerChatwootWebhook(accountId: number, inboxId: number, webhookUrl: string): Promise<void> {
+async function registerChatwootWebhook(accountId: number, webhookUrl: string): Promise<void> {
+  // Correct Chatwoot endpoint: /api/v1/accounts/:id/webhooks (NOT /integrations/webhooks)
   try {
-    await fetch(`${config.chatwoot.url}/api/v1/accounts/${accountId}/integrations/webhooks`, {
+    const r = await fetch(`${config.chatwoot.url.replace(/\/$/, '')}/api/v1/accounts/${accountId}/webhooks`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -388,8 +382,10 @@ async function registerChatwootWebhook(accountId: number, inboxId: number, webho
         subscriptions: ['message_created', 'conversation_updated'],
       }),
     });
+    const body = await r.text();
+    console.log(`[provisioning] Chatwoot webhook register: status=${r.status} body=${body.slice(0, 200)}`);
   } catch (e) {
-    console.error(`[provisioning] Chatwoot webhook register failed:`, String(e));
+    console.error('[provisioning] Chatwoot webhook register failed:', String(e));
   }
 }
 
