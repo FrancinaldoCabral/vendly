@@ -121,8 +121,8 @@ export async function findOrCreateTenant(
   const tenantId = generateId();
   const name = wcInfo?.wcUserName ?? email.split('@')[0];
 
-  // Create Chatwoot account for this tenant
-  const cwAccount = await createChatwootAccount(email, name);
+  // Create Chatwoot account for this tenant (uses internal email to avoid conflicts with existing Chatwoot users)
+  const cwAccount = await createChatwootAccount(email, name, tenantId);
 
   const tenant: TenantDoc = {
     _id: tenantId,
@@ -400,8 +400,9 @@ async function createEvolutionInstance(instance: string, webhookUrl: string): Pr
 // Returns { accountId, apiKey, ssoUrl } or null on failure.
 // Verified against production: all 4 steps return 200.
 export async function createChatwootAccount(
-  email: string,
+  tenantEmail: string,
   name: string,
+  tenantId: string,
 ): Promise<{ accountId: number; apiKey: string; ssoUrl: string } | null> {
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
   const platKey = config.chatwoot.platformKey;
@@ -411,6 +412,10 @@ export async function createChatwootAccount(
     console.error('[provisioning] CHATWOOT_PLATFORM_KEY not configured');
     return null;
   }
+
+  // Use internal email to guarantee uniqueness — avoids conflicts when tenant's real email
+  // is already registered in Chatwoot (e.g. as super admin). SSO link bypasses this email anyway.
+  const internalEmail = `tenant-${tenantId}@accounts.vendly.chat`;
 
   try {
     // Step 1: create isolated account
@@ -427,12 +432,12 @@ export async function createChatwootAccount(
     const accountId = account.id;
     console.log(`[provisioning] Chatwoot account created: id=${accountId} name=${name}`);
 
-    // Step 2: create admin user for this tenant
+    // Step 2: create admin user with internal email (avoids conflicts with real email)
     const password = generatePassword();
     const r2 = await fetch(`${cwUrl}/platform/api/v1/users`, {
       method: 'POST',
       headers: platHeaders,
-      body: JSON.stringify({ name, email, password, password_confirmation: password }),
+      body: JSON.stringify({ name, email: internalEmail, password, password_confirmation: password }),
     });
     const user = await r2.json() as { id?: number; access_token?: string };
     if (!r2.ok || !user.id) {
@@ -440,7 +445,7 @@ export async function createChatwootAccount(
       return null;
     }
     const apiKey = user.access_token ?? '';
-    console.log(`[provisioning] Chatwoot user created: id=${user.id} email=${email}`);
+    console.log(`[provisioning] Chatwoot user created: id=${user.id} internalEmail=${internalEmail} tenantEmail=${tenantEmail}`);
 
     // Step 3: add user to account as administrator
     const r3 = await fetch(`${cwUrl}/platform/api/v1/accounts/${accountId}/account_users`, {
