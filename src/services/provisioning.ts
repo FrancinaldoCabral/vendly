@@ -171,8 +171,9 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentD
   const agentId = generateId();
   const instance = `agent_${agentId}`;
 
-  // 1. Create Evolution instance
-  await createEvolutionInstance(instance);
+  // 1. Create Evolution instance + register webhook for connection updates
+  const evolutionWebhookUrl = `${config.app.url}/webhook/evolution/${instance}`;
+  await createEvolutionInstance(instance, evolutionWebhookUrl);
 
   // 2. Create Chatwoot inbox
   const inboxId = await createChatwootInbox(instance, input.name, agentId);
@@ -212,12 +213,29 @@ export async function deprovisionAgent(agentId: string, tenantId: string): Promi
   const agent = await db.collection<AgentDoc>('agents').findOne({ _id: agentId, tenantId });
   if (!agent) return;
 
+  const evUrl = config.evolution.url.replace(/\/$/, '');
+  const evHeaders = { apikey: config.evolution.apiKey };
+
+  // Logout first (required for connected instances)
+  try {
+    const logoutRes = await fetch(`${evUrl}/instance/logout/${agent.evolutionInstance}`, {
+      method: 'DELETE', headers: evHeaders,
+    });
+    console.log(`[provisioning] Evolution logout ${agent.evolutionInstance}: ${logoutRes.status}`);
+  } catch (e) {
+    console.warn(`[provisioning] Evolution logout failed (continuing):`, String(e));
+  }
+
   // Delete Evolution instance
   try {
-    await fetch(`${config.evolution.url}/instance/delete/${agent.evolutionInstance}`, {
-      method: 'DELETE',
-      headers: { apikey: config.evolution.apiKey },
+    const deleteRes = await fetch(`${evUrl}/instance/delete/${agent.evolutionInstance}`, {
+      method: 'DELETE', headers: evHeaders,
     });
+    console.log(`[provisioning] Evolution delete ${agent.evolutionInstance}: ${deleteRes.status}`);
+    if (!deleteRes.ok) {
+      const txt = await deleteRes.text();
+      console.error(`[provisioning] Evolution delete error body: ${txt.slice(0, 300)}`);
+    }
   } catch (e) {
     console.error(`[provisioning] Evolution delete failed:`, String(e));
   }
@@ -240,10 +258,13 @@ export async function deprovisionAgent(agentId: string, tenantId: string): Promi
 
 // ── Evolution ────────────────────────────────────────────────────────────────
 
-async function createEvolutionInstance(instance: string): Promise<void> {
-  const r = await fetch(`${config.evolution.url}/instance/create`, {
+async function createEvolutionInstance(instance: string, webhookUrl: string): Promise<void> {
+  const evUrl = config.evolution.url.replace(/\/$/, '');
+  const headers = { 'Content-Type': 'application/json', apikey: config.evolution.apiKey };
+
+  const r = await fetch(`${evUrl}/instance/create`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
+    headers,
     body: JSON.stringify({
       instanceName: instance,
       integration: 'WHATSAPP-BAILEYS',
@@ -254,6 +275,24 @@ async function createEvolutionInstance(instance: string): Promise<void> {
     const txt = await r.text();
     throw new Error(`Evolution instance create failed: ${r.status} ${txt.slice(0, 200)}`);
   }
+
+  // Register webhook so Evolution notifies us on CONNECTION_UPDATE
+  try {
+    const wRes = await fetch(`${evUrl}/webhook/set/${instance}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        url: webhookUrl,
+        enabled: true,
+        webhookBase64: false,
+        webhookByEvents: false,
+        events: ['CONNECTION_UPDATE', 'QRCODE_UPDATED'],
+      }),
+    });
+    console.log(`[provisioning] Evolution webhook set ${instance}: ${wRes.status}`);
+  } catch (e) {
+    console.warn(`[provisioning] Evolution webhook set failed (non-fatal):`, String(e));
+  }
 }
 
 // ── Chatwoot ─────────────────────────────────────────────────────────────────
@@ -261,11 +300,12 @@ async function createEvolutionInstance(instance: string): Promise<void> {
 async function createChatwootInbox(instance: string, name: string, agentId: string): Promise<number | null> {
   const webhookUrl = `${config.app.url}/webhook/chatwoot/${agentId}`;
   const acctId = config.chatwoot.accountId;
+  const evUrl = config.evolution.url.replace(/\/$/, '');
 
-  // Create inbox via Evolution's Chatwoot integration endpoint (auto-create)
-  // Evolution can auto-create a Chatwoot inbox and register the webhook
+  // Strategy 1: Evolution's built-in Chatwoot integration
+  // This links the WhatsApp instance directly to a Chatwoot inbox (messages flow automatically)
   try {
-    const r = await fetch(`${config.evolution.url}/chatwoot/create/${instance}`, {
+    const r = await fetch(`${evUrl}/chatwoot/create/${instance}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
       body: JSON.stringify({
@@ -281,20 +321,34 @@ async function createChatwootInbox(instance: string, name: string, agentId: stri
         webhook_url: webhookUrl,
       }),
     });
+
+    const rawBody = await r.text();
+    console.log(`[provisioning] Evolution Chatwoot create ${instance}: status=${r.status} body=${rawBody.slice(0, 400)}`);
+
     if (r.ok) {
-      const data = await r.json() as { inbox?: { id?: number }; id?: number };
-      const inboxId = data.inbox?.id ?? data.id ?? null;
+      // Evolution v2 returns: { chatwoot: { inbox_id: N, ... } }
+      // Some builds return: { inbox: { id: N } } or { id: N }
+      type EvCwResp = {
+        chatwoot?: { inbox_id?: number };
+        inbox?: { id?: number };
+        id?: number;
+        inbox_id?: number;
+      };
+      const data = JSON.parse(rawBody) as EvCwResp;
+      const inboxId = data.chatwoot?.inbox_id ?? data.inbox?.id ?? data.id ?? data.inbox_id ?? null;
       if (inboxId) {
-        // Register our webhook on Chatwoot inbox
+        console.log(`[provisioning] Chatwoot inbox linked via Evolution: inboxId=${inboxId}`);
         await registerChatwootWebhook(Number(acctId), inboxId, webhookUrl);
         return inboxId;
       }
+      console.warn(`[provisioning] Evolution Chatwoot create OK but could not extract inbox_id from response`);
     }
   } catch (e) {
-    console.error(`[provisioning] Chatwoot auto-create failed:`, String(e));
+    console.error(`[provisioning] Evolution Chatwoot create error:`, String(e));
   }
 
-  // Fallback: create inbox directly via Chatwoot API
+  // Strategy 2: Create inbox directly via Chatwoot API (fallback — no Evolution link)
+  // Warning: messages from WhatsApp won't flow automatically; Chatwoot only acts as conversation store
   try {
     const r2 = await fetch(`${config.chatwoot.url}/api/v1/accounts/${acctId}/inboxes`, {
       method: 'POST',
@@ -304,14 +358,20 @@ async function createChatwootInbox(instance: string, name: string, agentId: stri
       },
       body: JSON.stringify({ channel: { type: 'api', webhook_url: webhookUrl }, name }),
     });
+    const rawBody2 = await r2.text();
+    console.log(`[provisioning] Chatwoot direct inbox create: status=${r2.status} body=${rawBody2.slice(0, 200)}`);
     if (r2.ok) {
-      const data2 = await r2.json() as { id?: number };
-      return data2.id ?? null;
+      const data2 = JSON.parse(rawBody2) as { id?: number };
+      if (data2.id) {
+        console.warn(`[provisioning] Chatwoot inbox created directly (NOT linked to Evolution): inboxId=${data2.id}`);
+        return data2.id;
+      }
     }
   } catch (e) {
-    console.error(`[provisioning] Chatwoot fallback inbox create failed:`, String(e));
+    console.error(`[provisioning] Chatwoot direct inbox create error:`, String(e));
   }
 
+  console.error(`[provisioning] Failed to create Chatwoot inbox for agent=${agentId} instance=${instance}`);
   return null;
 }
 

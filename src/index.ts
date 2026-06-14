@@ -26,6 +26,7 @@ import { systemTools, handleSystemTool } from './tools/system.js';
 import { registerWebhookRoute } from './services/webhook.js';
 import { startScheduler } from './services/scheduler.js';
 import { provisionTenant, provisionAgent } from './services/provisioning.js';
+import { getDb } from './tools/mongodb.js';
 import { apiRouter } from './web/router.js';
 import { config } from './config.js';
 
@@ -155,6 +156,45 @@ async function main() {
       await provisionTenant({ email, name, woocommerceUserId });
     } catch (e) {
       console.error('[woocommerce] provisionTenant error:', String(e));
+    }
+  });
+
+  // ── Evolution webhook (connection updates per-instance) ───────────────────
+  webApp.post('/webhook/evolution/:instance', async (req, res) => {
+    res.status(200).json({ ok: true });
+
+    const { instance } = req.params;
+    const body = req.body as Record<string, unknown>;
+    const event = String(body.event ?? '').toLowerCase().replace(/[._-]/g, '_');
+
+    console.log(`[evolution-webhook] instance=${instance} event=${event}`);
+
+    if (event !== 'connection_update') return;
+
+    // Normalize state across Evolution payload variants
+    const data = (body.data ?? {}) as Record<string, unknown>;
+    const innerInst = (data.instance ?? {}) as Record<string, unknown>;
+    const state = String(innerInst.state ?? data.state ?? data.connectionStatus ?? '');
+
+    if (state !== 'open') {
+      console.log(`[evolution-webhook] ${instance}: state=${state} — ignoring`);
+      return;
+    }
+
+    try {
+      const db = await getDb();
+      const result = await db.collection('agents').findOneAndUpdate(
+        { evolutionInstance: instance, status: 'pending_qr' },
+        { $set: { status: 'active', updatedAt: new Date() } },
+        { returnDocument: 'after' },
+      );
+      if (result) {
+        console.log(`[evolution-webhook] Agent activated: agentId=${result._id} instance=${instance}`);
+      } else {
+        console.log(`[evolution-webhook] No pending_qr agent found for instance=${instance}`);
+      }
+    } catch (e) {
+      console.error(`[evolution-webhook] DB update failed:`, String(e));
     }
   });
 

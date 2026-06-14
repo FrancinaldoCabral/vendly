@@ -154,11 +154,22 @@ agentsRouter.get('/:agentId/status', async (req, res) => {
     const agent = await db.collection('agents').findOne(filter, { projection: { evolutionInstance: 1, status: 1 } }) as { evolutionInstance?: string; status?: string } | null;
     if (!agent) { res.status(404).json({ error: 'Agent not found' }); return; }
 
-    const r = await fetch(`${config.evolution.url}/instance/connectionState/${agent.evolutionInstance}`, {
+    const r = await fetch(`${config.evolution.url.replace(/\/$/, '')}/instance/connectionState/${agent.evolutionInstance}`, {
       headers: { apikey: config.evolution.apiKey },
     });
-    const data = await r.json() as { instance?: { state?: string } };
-    const connected = data.instance?.state === 'open';
+    // Evolution returns different formats depending on version:
+    // v2: { instance: { state: 'open' } }
+    // some builds: { state: 'open' }
+    // some builds: { connectionStatus: 'open' }
+    const rawState = await r.text();
+    console.log(`[agents/status] ${agent.evolutionInstance}: ${rawState.slice(0, 200)}`);
+    const data = JSON.parse(rawState) as {
+      instance?: { state?: string };
+      state?: string;
+      connectionStatus?: string;
+    };
+    const state = data.instance?.state ?? data.state ?? data.connectionStatus ?? '';
+    const connected = state === 'open';
 
     // Auto-update agent status when connected
     if (connected && agent.status === 'pending_qr') {

@@ -41,7 +41,7 @@ interface ChatwootPayload {
   conversation?: {
     id?: number;
     assignee?: unknown;
-    inbox_id?: number;
+    inbox_id?: number;  // Chatwoot inbox this conversation belongs to
     meta?: {
       sender?: {
         name?: string;
@@ -110,6 +110,21 @@ async function handleChatwootWebhook(agentId: string, payload: ChatwootPayload):
 
   // Skip if a human agent is assigned (human_takeover)
   if (payload.conversation?.assignee) return;
+
+  // Verify inbox_id matches this agent to prevent cross-agent processing
+  // (Chatwoot account-level webhooks send ALL inbox events to ALL registered URLs)
+  const inboxId = payload.conversation?.inbox_id;
+  if (inboxId) {
+    const db = await getDb();
+    const agentDoc = await db.collection('agents').findOne(
+      { _id: agentId } as Record<string, unknown>,
+      { projection: { chatwootInboxId: 1 } },
+    ) as { chatwootInboxId?: number } | null;
+    if (agentDoc?.chatwootInboxId && agentDoc.chatwootInboxId !== inboxId) {
+      console.log(`[webhook] inbox_id mismatch — agentId=${agentId} expected=${agentDoc.chatwootInboxId} got=${inboxId} — skipping`);
+      return;
+    }
+  }
 
   const redis = getRedis();
 
