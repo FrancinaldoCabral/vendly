@@ -25,7 +25,7 @@ import { systemTools, handleSystemTool } from './tools/system.js';
 
 import { registerWebhookRoute, handleEvolutionMessageWebhook } from './services/webhook.js';
 import { startScheduler } from './services/scheduler.js';
-import { provisionTenant, provisionAgent, reprovisionEvolutionWebhook } from './services/provisioning.js';
+import { findOrCreateTenant, sendWelcomeEmailWithChatwoot, sendMagicLink, provisionAgent, reprovisionEvolutionWebhook } from './services/provisioning.js';
 import { getDb } from './tools/mongodb.js';
 import { apiRouter } from './web/router.js';
 import { config } from './config.js';
@@ -178,9 +178,25 @@ async function main() {
     if (!['active', 'completed', 'processing'].includes(status)) return;
 
     try {
-      await provisionTenant({ email, name, woocommerceUserId });
+      // findOrCreateTenant is idempotent, creates Chatwoot account, and handles duplicates
+      const normalizedEmail = email.trim().toLowerCase();
+      const parsedWcId = parseInt(woocommerceUserId, 10);
+      const { tenant, isNew, chatwootSsoUrl } = await findOrCreateTenant(
+        normalizedEmail,
+        { wcUserId: Number.isFinite(parsedWcId) ? parsedWcId : undefined, wcUserName: name || undefined },
+      );
+      if (isNew) {
+        if (chatwootSsoUrl) {
+          await sendWelcomeEmailWithChatwoot(normalizedEmail, tenant.name, tenant._id, chatwootSsoUrl);
+        } else {
+          await sendMagicLink(normalizedEmail, tenant._id, tenant.name);
+        }
+        console.log(`[woocommerce] New tenant provisioned: ${normalizedEmail} id=${tenant._id}`);
+      } else {
+        console.log(`[woocommerce] Existing tenant: ${normalizedEmail} id=${tenant._id}`);
+      }
     } catch (e) {
-      console.error('[woocommerce] provisionTenant error:', String(e));
+      console.error('[woocommerce] findOrCreateTenant error:', String(e));
     }
   });
 

@@ -118,6 +118,11 @@ apiRouter.post('/auth/token', async (req, res) => {
     const payload = jwt.verify(token, config.jwt.secret) as { tenantId: string; email: string };
     const sessionToken = signTenantToken(payload.tenantId, payload.email);
     res.json({ token: sessionToken, tenantId: payload.tenantId });
+
+    // Non-blocking: heal Chatwoot account if this is a WooCommerce-provisioned tenant without one
+    findOrCreateTenant(payload.email).catch(e => {
+      console.warn('[auth/token] Chatwoot heal failed (non-fatal):', String(e));
+    });
   } catch {
     res.status(401).json({ error: 'Token inválido ou expirado' });
   }
@@ -261,22 +266,46 @@ apiRouter.post('/admin/fix-agent', requireAuth, requireAdmin, async (req, res) =
 apiRouter.post('/admin/reset', requireAuth, requireAdmin, async (_req, res) => {
   try {
     const results: Record<string, string> = {};
+    const evUrl = config.evolution.url.replace(/\/$/, '');
+    const evHeaders = { apikey: config.evolution.apiKey };
 
-    // 1. Drop MongoDB vendly database
+    // 0. Collect agent instances from MongoDB BEFORE dropping DB
+    let agentInstances: string[] = [];
+    try {
+      const db = await getDb();
+      const agents = await db.collection('agents').find({}, { projection: { evolutionInstance: 1 } }).toArray();
+      agentInstances = agents.map(a => String((a as Record<string, unknown>).evolutionInstance ?? '')).filter(Boolean);
+    } catch (e) { results.evolution_list = `warn: ${String(e)}`; }
+
+    // 1. Delete Evolution instances (logout + delete so they stop sending webhooks)
+    const evDeleted: string[] = [];
+    const evFailed: string[] = [];
+    for (const inst of agentInstances) {
+      try {
+        await fetch(`${evUrl}/instance/logout/${inst}`, { method: 'DELETE', headers: evHeaders });
+        const d = await fetch(`${evUrl}/instance/delete/${inst}`, { method: 'DELETE', headers: evHeaders });
+        if (d.ok) evDeleted.push(inst); else evFailed.push(inst);
+      } catch { evFailed.push(inst); }
+    }
+    results.evolution = evDeleted.length
+      ? `deleted: ${evDeleted.join(', ')}${evFailed.length ? ` | failed: ${evFailed.join(', ')}` : ''}`
+      : agentInstances.length ? `failed to delete all` : 'no instances';
+
+    // 2. Drop MongoDB vendly database
     try {
       const client = await getClient();
       await client.db('vendly').dropDatabase();
       results.mongodb = 'dropped database vendly';
     } catch (e) { results.mongodb = `error: ${String(e)}`; }
 
-    // 2. Flush all Redis keys
+    // 3. Flush all Redis keys
     try {
       const redis = getRedis();
       await redis.flushall();
       results.redis = 'FLUSHALL ok';
     } catch (e) { results.redis = `error: ${String(e)}`; }
 
-    // 3. Delete Qdrant agent_* collections
+    // 4. Delete Qdrant agent_* collections
     const qdrantBase = config.qdrant.url.replace(/\/$/, '');
     const qHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
     if (config.qdrant.apiKey) qHeaders['api-key'] = config.qdrant.apiKey;

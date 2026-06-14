@@ -259,12 +259,25 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentD
   const agentId = generateId();
   const instance = `agent_${agentId}`;
 
-  // 1. Load tenant to get their Chatwoot credentials
-  const tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: input.tenantId });
-  if (!tenant?.chatwoot) {
-    throw new Error(`Tenant ${input.tenantId} has no Chatwoot account. Call provisionTenant first.`);
+  // 1. Load tenant to get their Chatwoot credentials; heal if missing (WooCommerce path)
+  let tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: input.tenantId });
+  if (!tenant) throw new Error(`Tenant ${input.tenantId} not found.`);
+
+  if (!tenant.chatwoot) {
+    console.log(`[provisioning] provisionAgent: tenant ${input.tenantId} missing Chatwoot — creating now`);
+    const cwAccount = await createChatwootAccount(tenant.email, tenant.name, input.tenantId);
+    if (!cwAccount) throw new Error(`Cannot create agent: failed to create Chatwoot account for tenant ${input.tenantId}.`);
+    await db.collection<TenantDoc>('tenants').updateOne(
+      { _id: input.tenantId } as Record<string, unknown>,
+      { $set: { chatwoot: { accountId: cwAccount.accountId, userId: cwAccount.userId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl } } },
+    );
+    tenant = { ...tenant, chatwoot: { accountId: cwAccount.accountId, userId: cwAccount.userId, apiKey: cwAccount.apiKey, ssoUrl: cwAccount.ssoUrl } };
+    console.log(`[provisioning] Chatwoot healed for tenant ${input.tenantId}: accountId=${cwAccount.accountId}`);
   }
-  const { accountId: cwAccountId, apiKey: cwApiKey } = tenant.chatwoot;
+
+  // tenant.chatwoot is guaranteed non-null here (created/healed above, or pre-existing)
+  const tenantCw = tenant.chatwoot as NonNullable<TenantDoc['chatwoot']>;
+  const { accountId: cwAccountId, apiKey: cwApiKey } = tenantCw;
 
   // 2. Create Evolution instance + register webhook for connection updates
   const evolutionWebhookUrl = `${config.app.url}/webhook/evolution/${instance}`;
