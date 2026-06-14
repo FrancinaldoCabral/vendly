@@ -46,7 +46,7 @@ agentsRouter.post('/', async (req, res) => {
     if (!name || !systemPrompt) {
       res.status(400).json({ error: 'name e systemPrompt são obrigatórios' }); return;
     }
-    const agent = await provisionAgent({
+    const provisioned = await provisionAgent({
       tenantId: (req.body.tenantId as string | undefined) ?? tenantId,
       name: String(name),
       systemPrompt: String(systemPrompt),
@@ -54,7 +54,8 @@ agentsRouter.post('/', async (req, res) => {
       tools: Array.isArray(tools) ? (tools as string[]) : undefined,
       phone: phone ? String(phone) : undefined,
     });
-    res.status(201).json(agent);
+    const { qrCodeUrl, ...agent } = provisioned;
+    res.status(201).json({ agent, qrCodeUrl });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 

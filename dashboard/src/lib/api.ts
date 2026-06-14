@@ -41,7 +41,7 @@ export const api = {
     req<Agent>(`/agents/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteAgent: (id: string) => req<{ ok: boolean }>(`/agents/${id}`, { method: 'DELETE' }),
   getAgentQr: (id: string) => req<{ base64: string | null; code: string | null }>(`/agents/${id}/qr`),
-  getAgentStatus: (id: string) => req<{ status: string }>(`/agents/${id}/status`),
+  getAgentStatus: (id: string) => req<{ agentStatus: string; connected: boolean }>(`/agents/${id}/status`),
 
   // Knowledge
   getKnowledge: (agentId: string, params?: Record<string, string>) => {

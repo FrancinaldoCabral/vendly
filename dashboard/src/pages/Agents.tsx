@@ -70,7 +70,7 @@ function QrModal({ agentId, agentName, open, onClose }: { agentId: string; agent
     statusRef.current = setInterval(async () => {
       try {
         const d = await api.getAgentStatus(agentId);
-        if (d.status === 'open') {
+        if (d.connected) {
           setConnected(true);
           if (statusRef.current) clearInterval(statusRef.current);
           if (refreshRef.current) clearInterval(refreshRef.current);

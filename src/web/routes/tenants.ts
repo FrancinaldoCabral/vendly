@@ -33,6 +33,22 @@ tenantsRouter.post('/', requireAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// PUT /api/tenants/me — self-service: current tenant can update own name
+tenantsRouter.put('/me', async (req, res) => {
+  try {
+    const db = await getDb();
+    const update: Record<string, unknown> = { updatedAt: new Date() };
+    if (req.body.name !== undefined) update.name = req.body.name;
+    const result = await db.collection<TenantDoc>('tenants').findOneAndUpdate(
+      { _id: req.auth!.tenantId },
+      { $set: update },
+      { returnDocument: 'after' },
+    );
+    if (!result) { res.status(404).json({ error: 'Tenant not found' }); return; }
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // PUT /api/tenants/:tenantId — admin: update status/plan
 tenantsRouter.put('/:tenantId', requireAdmin, async (req, res) => {
   try {
