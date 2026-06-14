@@ -207,11 +207,10 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
 
 // ── Agent Form Modal ─────────────────────────────────────────────────────────
 
-function AgentModal({ agent, open, onClose, onCreated }: {
+function AgentModal({ agent, open, onClose }: {
   agent: Agent | null;
   open: boolean;
   onClose: () => void;
-  onCreated?: (agent: Agent) => void;
 }) {
   const qc = useQueryClient();
   const [form] = Form.useForm();
@@ -250,9 +249,8 @@ function AgentModal({ agent, open, onClose, onCreated }: {
     mutationFn: (vals: Record<string, unknown>) => api.createAgent(buildPayload(vals)),
     onSuccess: ({ agent: created }) => {
       qc.invalidateQueries({ queryKey: ['agents'] });
-      message.success(`Agente "${created.name}" criado! Conecte o WhatsApp para ativar.`);
+      message.success(`Agente "${created.name}" criado! Conecte o WhatsApp.`);
       onClose();
-      onCreated?.(created as Agent);
     },
     onError: (e: Error) => message.error(e.message),
   });
@@ -473,12 +471,7 @@ export default function Agents() {
         })}
       </Space>
 
-      <AgentModal
-        open={modalOpen}
-        agent={editAgent}
-        onClose={() => setModalOpen(false)}
-        onCreated={(a) => setQrAgent(a)}
-      />
+      <AgentModal open={modalOpen} agent={editAgent} onClose={() => setModalOpen(false)} />
       {qrAgent && (
         <QrModal
           agentId={qrAgent._id}
