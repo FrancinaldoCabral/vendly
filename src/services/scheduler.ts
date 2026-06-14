@@ -169,7 +169,7 @@ async function callLLM(system: string, user: string, _agentId: string): Promise<
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
+        model: config.openrouter.chatModel,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: user },

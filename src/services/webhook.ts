@@ -10,9 +10,45 @@ import type { Router, Request, Response } from 'express';
 import { getRedis } from '../tools/redis.js';
 import { getDb } from '../tools/mongodb.js';
 import { scheduleDebounce } from './debounce.js';
+import {
+  classifyEvolutionMedia,
+  fetchEvolutionMediaBase64,
+  transcribeAudio,
+} from './media.js';
 
 const DEDUP_TTL = 120; // seconds
 const EV_PROC_TTL = 30; // seconds — how long Evolution "claimed" a message
+
+// ── Contact filter (blacklist / whitelist) ──────────────────────────────────
+// Cached in Redis as contact_filter:{instance} = { mode, contacts[], groups[] }
+// (ported from the original stack-mcp businesses model). Default: empty blacklist
+// → everyone passes.
+
+interface ContactFilter {
+  mode: 'blacklist' | 'whitelist';
+  contacts: string[];
+  groups: string[];
+}
+
+/**
+ * Decide whether a message from `senderPhone` in chat `jid` should be handled,
+ * given the instance's contact filter. Groups are matched by group JID, direct
+ * chats by phone number. Empty blacklist → always pass; empty whitelist → block.
+ */
+async function passesContactFilter(instance: string, jid: string, senderPhone: string): Promise<boolean> {
+  try {
+    const raw = await getRedis().get(`contact_filter:${instance}`);
+    if (!raw) return true; // no filter configured
+    const f = JSON.parse(raw) as ContactFilter;
+    const isGroup = jid.endsWith('@g.us');
+    const phone = senderPhone.replace(/\D/g, '');
+    const listed = isGroup ? f.groups.includes(jid) : f.contacts.includes(phone);
+    if (f.mode === 'whitelist') return listed; // only listed allowed
+    return !listed; // blacklist: listed are blocked
+  } catch {
+    return true; // never block on filter errors
+  }
+}
 
 // ── Chatwoot webhook payload shapes ─────────────────────────────────────────
 
@@ -240,37 +276,77 @@ export async function handleEvolutionMessageWebhook(
       continue;
     }
 
-    // Mark as "processed by Evolution path" so Chatwoot webhook skips it
-    await redis.set(`ev_proc:${msgId}`, '1', 'EX', EV_PROC_TTL);
-
-    // Extract text from various WhatsApp message types
-    const message = (msg.message ?? {}) as Record<string, unknown>;
-    const extMsg = (message.extendedTextMessage ?? {}) as Record<string, unknown>;
-    const imgMsg = (message.imageMessage ?? {}) as Record<string, unknown>;
-    const vidMsg = (message.videoMessage ?? {}) as Record<string, unknown>;
-    const docMsg = (message.documentMessage ?? {}) as Record<string, unknown>;
-
-    const text = String(
-      message.conversation
-        ?? extMsg.text
-        ?? imgMsg.caption
-        ?? vidMsg.caption
-        ?? docMsg.caption
-        ?? (message.audioMessage ? '[Áudio]' : message.stickerMessage ? '[Sticker]' : '')
-    );
-
     // For group messages: remoteJid is the group, participant is the actual sender
     const isGroup = jid.endsWith('@g.us');
     const senderJid = isGroup ? String(key.participant ?? jid) : jid;
     const senderPhone = senderJid.replace(/@[^@]+$/, '').replace(/\D/g, '');
     const pushName = String(msg.pushName ?? '');
 
-    // Use JID as conversation key (stable across sessions, unique per contact/group)
-    const convKey = jid.replace(/[^a-z0-9]/gi, '_');
+    // Blacklist / whitelist enforcement (before any expensive media work)
+    if (!(await passesContactFilter(instance, jid, senderPhone))) {
+      console.log(`[ev-webhook] BLOCKED by contact filter instance=${instance} jid=${jid} sender=${senderPhone}`);
+      continue;
+    }
+
+    // Mark as "processed by Evolution path" so Chatwoot webhook skips it
+    await redis.set(`ev_proc:${msgId}`, '1', 'EX', EV_PROC_TTL);
+
+    // Extract text from various WhatsApp message types
+    const message = (msg.message ?? {}) as Record<string, unknown>;
+    const extMsg = (message.extendedTextMessage ?? {}) as Record<string, unknown>;
+
+    let text = String(message.conversation ?? extMsg.text ?? '');
+
+    // Multimodal input: classify + download + (audio) transcribe / (visual) attach base64
+    let mediaBase64: string | undefined;
+    let mediaMimetype: string | undefined;
+    let mediaKind: string | undefined;
+    let mediaFileName: string | undefined;
+    let userSentAudio = false;
+
+    const media = classifyEvolutionMedia(message);
+    if (media) {
+      if (media.caption && !text) text = media.caption;
+      if (media.kind === 'audio') {
+        userSentAudio = true;
+        const fetched = await fetchEvolutionMediaBase64(instance, msg);
+        if (fetched) {
+          const transcript = await transcribeAudio(fetched.base64, fetched.mimetype ?? media.mimetype);
+          text = [text, transcript].filter(Boolean).join('\n') || '[Áudio sem fala reconhecível]';
+        } else {
+          text = text || '[Áudio recebido]';
+        }
+      } else if (media.kind === 'sticker') {
+        text = text || '[Figurinha]';
+      } else {
+        // image / video / document → attach bytes for the multimodal model
+        const fetched = await fetchEvolutionMediaBase64(instance, msg);
+        if (fetched) {
+          mediaBase64 = fetched.base64;
+          mediaMimetype = fetched.mimetype ?? media.mimetype;
+          mediaKind = media.kind;
+          mediaFileName = media.fileName;
+          if (!text) {
+            text = media.kind === 'document'
+              ? `[Documento: ${media.fileName ?? 'arquivo'}]`
+              : media.kind === 'image' ? '[Imagem]' : '[Vídeo]';
+          }
+        }
+      }
+    }
+
+    // Conversation key: per-contact for direct chats, per-group-member for groups
+    const groupSan = jid.replace(/[^a-z0-9]/gi, '_');
+    const convKey = isGroup ? `${groupSan}_${senderPhone}` : groupSan;
     const bufferKey = `buffer:t:${tenantId}:ev:${convKey}`;
 
     const entry = JSON.stringify({
       text,
+      mediaBase64,
+      mediaMimetype,
+      mediaKind,
+      mediaFileName,
+      userSentAudio,
       senderPhone,
       senderName: pushName || senderPhone || 'Usuário',
       contactJid: jid,
@@ -282,7 +358,7 @@ export async function handleEvolutionMessageWebhook(
     await redis.lpush(bufferKey, entry);
     await redis.expire(bufferKey, 300);
 
-    console.log(`[ev-webhook] buffered agent=${agentId} tenant=${tenantId} jid=${jid} text="${text.slice(0, 60)}"`);
+    console.log(`[ev-webhook] buffered agent=${agentId} tenant=${tenantId} jid=${jid} kind=${mediaKind ?? (userSentAudio ? 'audio' : 'text')} text="${text.slice(0, 60)}"`);
 
     scheduleDebounce(agentId, `ev:${convKey}`, tenantId);
   }

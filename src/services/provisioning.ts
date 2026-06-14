@@ -52,6 +52,7 @@ export interface AgentDoc {
   tools: string[];
   customApis: unknown[];
   groupConfig: { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean };
+  contactFilter: { mode: 'blacklist' | 'whitelist'; contacts: string[]; groups: string[] };
   status: 'pending_qr' | 'active' | 'paused';
   createdAt: Date;
 }
@@ -297,10 +298,11 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentD
     evolutionInstance: instance,
     chatwootInboxId: inboxId ?? undefined,
     systemPrompt: input.systemPrompt,
-    model: input.model ?? 'google/gemini-2.5-flash',
+    model: input.model ?? config.openrouter.chatModel,
     tools: input.tools ?? ['evolution', 'chatwoot'],
     customApis: [],
     groupConfig: { respondToMentions: true, respondToReplies: true, respondToAll: false },
+    contactFilter: { mode: 'blacklist', contacts: [], groups: [] }, // default: empty blacklist → everyone passes
     status: 'pending_qr',
     createdAt: new Date(),
   };

@@ -39,6 +39,10 @@ export const config = {
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY ?? '',
     embeddingModel: process.env.OPENROUTER_EMBEDDING_MODEL ?? 'openai/text-embedding-3-small',
+    // Primary chat/reasoning model. Also multimodal (text, audio, image, files, video).
+    chatModel: process.env.OPENROUTER_CHAT_MODEL ?? 'google/gemini-3.1-flash-lite',
+    // Multimodal model used for transcription / reading media. Same family by default.
+    multimodalModel: process.env.OPENROUTER_MULTIMODAL_MODEL ?? 'google/gemini-3.1-flash-lite',
     fallbackModel: process.env.OPENROUTER_FALLBACK_MODEL ?? 'google/gemini-3.1-flash-lite',
     ttlModel: process.env.MODEL_TTS ?? 'google/gemini-3.1-flash-tts-preview',
     ttsVoice: process.env.VOICE_TTS ?? 'Kore',

@@ -367,7 +367,7 @@ async function main() {
         res.status(500).json({ error: `download: ${String(err)}` }); return;
       } finally { clearTimeout(t); }
     }
-    const model = 'google/gemini-2.0-flash-lite-001';
+    const model = config.openrouter.multimodalModel;
     const ctrl2 = new AbortController();
     const t2 = setTimeout(() => ctrl2.abort(), 30_000);
     try {

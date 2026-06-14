@@ -8,6 +8,7 @@ import { getDb } from '../tools/mongodb.js';
 import { config } from '../config.js';
 import { agentLoop, type AgentLoopContext, type OpenRouterMessage } from './agent-loop.js';
 import { groupFilter, type GroupConfig } from './group-filter.js';
+import { generateTts, buildMediaContentPart, type MediaKind } from './media.js';
 
 const DEBOUNCE_MS = 12_000; // 12 s — allows for back-to-back typing before processing
 const HISTORY_MAX = 40; // message pairs kept in Redis session
@@ -115,8 +116,13 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   // Parse buffered entries (JSON strings pushed by webhook service)
   interface BufferEntry {
     text?: string;
-    mediaUrl?: string;
-    mediaType?: string;
+    mediaUrl?: string;       // Chatwoot path: attachment data_url
+    mediaType?: string;      // Chatwoot path: attachment file_type
+    mediaBase64?: string;    // Evolution path: downloaded media bytes
+    mediaMimetype?: string;
+    mediaKind?: MediaKind;
+    mediaFileName?: string;
+    userSentAudio?: boolean; // client sent a voice message → mirror with audio
     senderName?: string;
     senderPhone?: string;
     contactJid?: string;
@@ -147,9 +153,12 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     return;
   }
 
-  // Recompute keys using JID when available — unifies Evolution + Chatwoot paths
+  // Recompute keys using JID when available — unifies Evolution + Chatwoot paths.
+  // Groups get a per-member session scope so each group contact keeps its own history.
   const jidKey = contactJid ? contactJid.replace(/[^a-z0-9]/gi, '_') : '';
-  const activeSessionKey = jidKey ? `sessao:t:${tenantId}:${agentId}:${jidKey}` : sessionKey;
+  const isGroupConv = contactJid.endsWith('@g.us');
+  const sessionScope = isGroupConv && senderPhone ? `${jidKey}_${senderPhone}` : jidKey;
+  const activeSessionKey = sessionScope ? `sessao:t:${tenantId}:${agentId}:${sessionScope}` : sessionKey;
   const activeTakeoverKey = jidKey ? `human_takeover:t:${tenantId}:${agentId}:${jidKey}` : takeoverKey;
 
   // Second takeover check using JID key (covers human takeover from Chatwoot path)
@@ -200,20 +209,41 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     try { history = JSON.parse(sessionRaw) as OpenRouterMessage[]; } catch { /**/ }
   }
 
-  // Build user content (handle text + optional media)
+  // Did the client speak (or ask for) audio? → mirror the reply in audio.
+  const userSentAudio = entries.some(e => e.userSentAudio);
+  const asksForAudio = /\b(á?udio|me\s+manda?\s+(um\s+)?(á?udio|voz)|responde?\s+(em\s+|por\s+|com\s+)?(á?udio|voz)|manda?\s+(em\s+|por\s+|um\s+)?(á?udio|voz))\b/i.test(consolidatedText);
+  const replyInAudio = userSentAudio || asksForAudio;
+
+  // Build user content (text + any attached media as multimodal parts)
   let userContent: unknown;
-  if (lastEntry.mediaUrl && lastEntry.mediaType) {
+  const mediaEntries = entries.filter(e => e.mediaBase64 && e.mediaKind);
+  if (mediaEntries.length > 0 || (lastEntry.mediaUrl && lastEntry.mediaType)) {
     const parts: unknown[] = [];
     if (consolidatedText) parts.push({ type: 'text', text: consolidatedText });
-    parts.push({ type: 'image_url', image_url: { url: lastEntry.mediaUrl } });
-    userContent = parts;
+    for (const m of mediaEntries) {
+      const part = buildMediaContentPart(
+        m.mediaKind!, m.mediaBase64!, m.mediaMimetype ?? 'application/octet-stream', m.mediaFileName,
+      );
+      if (part) parts.push(part);
+    }
+    // Chatwoot path attachment (already a hosted URL)
+    if (lastEntry.mediaUrl && lastEntry.mediaType) {
+      parts.push({ type: 'image_url', image_url: { url: lastEntry.mediaUrl } });
+    }
+    userContent = parts.length ? parts : consolidatedText;
   } else {
     userContent = consolidatedText;
   }
 
+  // When mirroring with audio, the reply is converted to speech — steer the model
+  // toward natural spoken language (no markdown, no bullet symbols, spell things out).
+  const audioNote = replyInAudio
+    ? `\n\n---\nIMPORTANTE: Sua resposta será convertida em ÁUDIO (mensagem de voz). Escreva como se estivesse falando: linguagem natural, sem markdown, sem listas com símbolos, sem emojis. Frases faladas.`
+    : '';
+
   // Build messages array: system + history + new user message
   const messages: OpenRouterMessage[] = [
-    { role: 'system', content: agentDoc.systemPrompt + WHATSAPP_STYLE_SUFFIX },
+    { role: 'system', content: agentDoc.systemPrompt + WHATSAPP_STYLE_SUFFIX + audioNote },
     ...history,
     { role: 'user', content: userContent },
   ];
@@ -227,7 +257,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     chatwootConvId,
     messages,
     agent: {
-      model: agentDoc.model ?? 'google/gemini-2.5-flash',
+      model: agentDoc.model ?? config.openrouter.chatModel,
       temperature: agentDoc.temperature,
       maxIter: agentDoc.maxIter,
       tools: agentDoc.tools ?? ['evolution', 'chatwoot'],
@@ -252,8 +282,21 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     return;
   }
 
+  // Mirror the client: if they spoke (or asked for) audio, reply with a voice note.
+  // Falls back to text chunks if TTS fails.
+  const cleanContent = content.replace(/\[ESCALAR_HUMANO\]/g, '').trim();
+  let sentAsAudio = false;
+  if (replyInAudio && cleanContent) {
+    const tts = await generateTts(cleanContent);
+    if (tts) {
+      await sendEvolutionAudio(instance, contactJid, tts.base64);
+      sentAsAudio = true;
+      console.log(`[debounce] replied with audio agent=${agentId} conv=${conversationId}`);
+    }
+  }
+
   // Send response via Evolution API (chunked into short WhatsApp-style messages)
-  const chunks = chunkMessage(content);
+  const chunks = sentAsAudio ? [] : chunkMessage(content);
   for (let i = 0; i < chunks.length; i++) {
     await sendEvolutionText(instance, contactJid, chunks[i]);
     if (i < chunks.length - 1) await sleep(700);
@@ -332,37 +375,20 @@ export async function processBuffer(agentId: string, conversationId: string, ten
 function chunkMessage(text: string, maxLen = 280): string[] {
   const clean = text.replace(/\[ESCALAR_HUMANO\]/g, '').trim();
   if (!clean) return [];
-  if (clean.length <= maxLen) return [clean];
 
-  // Split on paragraph breaks first
-  const blocks = clean.split(/\n\n+/).map(b => b.trim()).filter(Boolean);
+  // Every line break (single OR double) is a message boundary — this is what makes
+  // the agent feel human on WhatsApp instead of dumping one big block. The system
+  // prompt instructs the model to separate ideas with line breaks; here we honor them.
+  const lines = clean.split(/\n+/).map(l => l.trim()).filter(Boolean);
   const result: string[] = [];
 
-  for (const block of blocks) {
-    if (block.length <= maxLen) {
-      result.push(block);
-      continue;
+  for (const line of lines) {
+    if (line.length <= maxLen) {
+      result.push(line);
+    } else {
+      // A single very long line with no breaks → split on sentence boundaries.
+      for (const piece of splitLongText(line, maxLen)) result.push(piece);
     }
-    // Block too long → split on single newlines
-    const lines = block.split(/\n/).map(l => l.trim()).filter(Boolean);
-    let current = '';
-    for (const line of lines) {
-      const candidate = current ? `${current}\n${line}` : line;
-      if (candidate.length <= maxLen) {
-        current = candidate;
-      } else {
-        if (current) result.push(current);
-        if (line.length <= maxLen) {
-          current = line;
-        } else {
-          // Long unbroken line → split into multiple short pieces
-          const pieces = splitLongText(line, maxLen);
-          for (let p = 0; p < pieces.length - 1; p++) result.push(pieces[p]);
-          current = pieces[pieces.length - 1] ?? '';
-        }
-      }
-    }
-    if (current) result.push(current);
   }
 
   return result.filter(c => c.length > 0);
@@ -408,6 +434,20 @@ async function sendEvolutionText(instance: string, jid: string, text: string): P
     });
   } catch (e) {
     console.error(`[debounce] Evolution sendText failed:`, String(e));
+  }
+}
+
+/** Send a base64 audio payload as a WhatsApp voice note (PTT). */
+async function sendEvolutionAudio(instance: string, jid: string, base64: string): Promise<void> {
+  const url = `${config.evolution.url}/message/sendWhatsAppAudio/${instance}`;
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': config.evolution.apiKey },
+      body: JSON.stringify({ number: jid, audio: base64 }),
+    });
+  } catch (e) {
+    console.error(`[debounce] Evolution sendWhatsAppAudio failed:`, String(e));
   }
 }
 

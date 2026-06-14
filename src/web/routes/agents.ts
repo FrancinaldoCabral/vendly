@@ -5,9 +5,35 @@
 import { Router } from 'express';
 import { getDb } from '../../tools/mongodb.js';
 import { provisionAgent, deprovisionAgent } from '../../services/provisioning.js';
+import { getRedis } from '../../tools/redis.js';
 import { config } from '../../config.js';
 
 export const agentsRouter = Router();
+
+// ── Contact filter (blacklist / whitelist) helpers ───────────────────────────
+
+interface ContactFilter {
+  mode: 'blacklist' | 'whitelist';
+  contacts: string[];
+  groups: string[];
+}
+
+function sanitizeFilter(f: Partial<ContactFilter> | undefined | null): ContactFilter {
+  const mode = f?.mode === 'whitelist' ? 'whitelist' : 'blacklist';
+  const contacts = Array.from(new Set((f?.contacts ?? []).map(c => String(c).replace(/\D/g, '')).filter(Boolean)));
+  const groups = Array.from(new Set((f?.groups ?? []).map(g => String(g).trim()).filter(g => g.endsWith('@g.us'))));
+  return { mode, contacts, groups };
+}
+
+/** Mirror the filter into Redis (contact_filter:{instance}) for the webhook fast-path. */
+async function syncFilterToRedis(instance: string, filter: ContactFilter): Promise<void> {
+  if (!instance) return;
+  try {
+    await getRedis().set(`contact_filter:${instance}`, JSON.stringify(filter));
+  } catch (e) {
+    console.warn('[agents] syncFilterToRedis failed:', String(e));
+  }
+}
 
 // GET /api/agents — list agents for current tenant
 agentsRouter.get('/', async (req, res) => {
@@ -68,10 +94,14 @@ agentsRouter.put('/:agentId', async (req, res) => {
     if (tenantId !== '__admin__') filter.tenantId = tenantId;
 
     const allowed = ['name', 'systemPrompt', 'model', 'temperature', 'maxIter', 'tools',
-      'customApis', 'groupConfig', 'escalationTeamId', 'escalationAgentId', 'status'];
+      'customApis', 'groupConfig', 'contactFilter', 'escalationTeamId', 'escalationAgentId', 'status'];
     const update: Record<string, unknown> = { updatedAt: new Date() };
     for (const k of allowed) {
       if (req.body[k] !== undefined) update[k] = req.body[k];
+    }
+    // Sanitize the contact filter if present
+    if (update.contactFilter !== undefined) {
+      update.contactFilter = sanitizeFilter(update.contactFilter as Partial<ContactFilter>);
     }
 
     const result = await db.collection('agents').findOneAndUpdate(
@@ -80,7 +110,44 @@ agentsRouter.put('/:agentId', async (req, res) => {
       { returnDocument: 'after' },
     );
     if (!result) { res.status(404).json({ error: 'Agent not found' }); return; }
+    // Keep the Redis fast-path filter in sync with the agent's instance
+    if (update.contactFilter !== undefined) {
+      const inst = (result as { evolutionInstance?: string }).evolutionInstance ?? '';
+      await syncFilterToRedis(inst, update.contactFilter as ContactFilter);
+    }
     res.json(result);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// GET /api/agents/:agentId/contact-filter — blacklist/whitelist for this agent
+agentsRouter.get('/:agentId/contact-filter', async (req, res) => {
+  try {
+    const tenantId = req.auth!.tenantId;
+    const db = await getDb();
+    const filter: Record<string, unknown> = { _id: req.params.agentId };
+    if (tenantId !== '__admin__') filter.tenantId = tenantId;
+    const agent = await db.collection('agents').findOne(filter, { projection: { contactFilter: 1 } }) as { contactFilter?: Partial<ContactFilter> } | null;
+    if (!agent) { res.status(404).json({ error: 'Agent not found' }); return; }
+    res.json({ contactFilter: sanitizeFilter(agent.contactFilter) });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// PUT /api/agents/:agentId/contact-filter — replace blacklist/whitelist
+agentsRouter.put('/:agentId/contact-filter', async (req, res) => {
+  try {
+    const tenantId = req.auth!.tenantId;
+    const db = await getDb();
+    const filter: Record<string, unknown> = { _id: req.params.agentId };
+    if (tenantId !== '__admin__') filter.tenantId = tenantId;
+    const clean = sanitizeFilter(req.body as Partial<ContactFilter>);
+    const result = await db.collection('agents').findOneAndUpdate(
+      filter,
+      { $set: { contactFilter: clean, updatedAt: new Date() } },
+      { returnDocument: 'after', projection: { evolutionInstance: 1, contactFilter: 1 } },
+    ) as { evolutionInstance?: string } | null;
+    if (!result) { res.status(404).json({ error: 'Agent not found' }); return; }
+    await syncFilterToRedis(result.evolutionInstance ?? '', clean);
+    res.json({ contactFilter: clean });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
