@@ -271,14 +271,19 @@ apiRouter.post('/admin/reset', requireAuth, requireAdmin, async (_req, res) => {
     const evUrl = config.evolution.url.replace(/\/$/, '');
     const evHeaders = { apikey: config.evolution.apiKey };
 
-    // 0. Collect Chatwoot account IDs from MongoDB BEFORE dropping it (so we can
-    //    delete the isolated accounts and not leave orphans behind).
+    // 0. Collect Chatwoot account + user IDs from MongoDB BEFORE dropping it, so we
+    //    can delete both (deleting only the account leaves the user — which keeps the
+    //    real email "taken" and forces the alias fallback next time).
     let chatwootAccountIds: number[] = [];
+    let chatwootUserIds: number[] = [];
     try {
       const db = await getDb();
-      const tenants = await db.collection('tenants').find({}, { projection: { 'chatwoot.accountId': 1 } }).toArray();
+      const tenants = await db.collection('tenants').find({}, { projection: { 'chatwoot.accountId': 1, 'chatwoot.userId': 1 } }).toArray();
       chatwootAccountIds = tenants
         .map(t => (t as { chatwoot?: { accountId?: number } }).chatwoot?.accountId)
+        .filter((id): id is number => typeof id === 'number');
+      chatwootUserIds = tenants
+        .map(t => (t as { chatwoot?: { userId?: number } }).chatwoot?.userId)
         .filter((id): id is number => typeof id === 'number');
     } catch (e) { results.chatwoot_list = `warn: ${String(e)}`; }
 
@@ -308,20 +313,28 @@ apiRouter.post('/admin/reset', requireAuth, requireAdmin, async (_req, res) => {
       ? `deleted: ${evDeleted.join(', ') || '—'}${evFailed.length ? ` | failed: ${evFailed.join(', ')}` : ''}`
       : 'no instances';
 
-    // 2. Delete Chatwoot accounts via Platform API (removes their conversations too)
+    // 2. Delete Chatwoot accounts (removes their conversations) AND users (frees emails)
     const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+    const cwPlatHeaders = { 'api_access_token': config.chatwoot.platformKey };
     const cwDeleted: number[] = [];
-    if (config.chatwoot.platformKey && chatwootAccountIds.length) {
+    const cwUsersDeleted: number[] = [];
+    if (config.chatwoot.platformKey) {
       for (const id of chatwootAccountIds) {
         try {
-          const r = await fetch(`${cwUrl}/platform/api/v1/accounts/${id}`, {
-            method: 'DELETE', headers: { 'api_access_token': config.chatwoot.platformKey },
-          });
+          const r = await fetch(`${cwUrl}/platform/api/v1/accounts/${id}`, { method: 'DELETE', headers: cwPlatHeaders });
           if (r.ok) cwDeleted.push(id);
         } catch { /* ignore */ }
       }
+      for (const id of chatwootUserIds) {
+        try {
+          const r = await fetch(`${cwUrl}/platform/api/v1/users/${id}`, { method: 'DELETE', headers: cwPlatHeaders });
+          if (r.ok) cwUsersDeleted.push(id);
+        } catch { /* ignore */ }
+      }
     }
-    results.chatwoot = chatwootAccountIds.length ? `deleted accounts: ${cwDeleted.join(', ') || '—'}` : 'no accounts';
+    results.chatwoot = chatwootAccountIds.length || chatwootUserIds.length
+      ? `accounts: ${cwDeleted.join(', ') || '—'} | users: ${cwUsersDeleted.join(', ') || '—'}`
+      : 'no accounts';
 
     // 3. Drop MongoDB vendly database
     try {

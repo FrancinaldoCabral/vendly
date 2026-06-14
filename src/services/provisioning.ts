@@ -570,9 +570,12 @@ export async function createChatwootAccount(
     return null;
   }
 
-  // Use internal email to guarantee uniqueness — avoids conflicts when tenant's real email
-  // is already registered in Chatwoot (e.g. as super admin). SSO link bypasses this email anyway.
-  const internalEmail = `tenant-${tenantId}@accounts.vendly.chat`;
+  const realEmail = tenantEmail.trim().toLowerCase();
+  // Fallback alias used ONLY if the real email is already taken in Chatwoot (rare —
+  // e.g. it's the platform super-admin, or a leftover user). Kept on the same domain
+  // so it stays recognizable; login is via SSO anyway.
+  const [local, domain] = realEmail.split('@');
+  const aliasEmail = `${local || 'user'}+t${tenantId}@${domain || 'accounts.vendly.chat'}`;
 
   try {
     // Step 1: create isolated account
@@ -589,21 +592,34 @@ export async function createChatwootAccount(
     const accountId = account.id;
     console.log(`[provisioning] Chatwoot account created: id=${accountId} name=${name}`);
 
-    // Step 2: create admin user with internal email (avoids conflicts with real email)
+    // Step 2: create admin user with the tenant's REAL email. Only if Chatwoot
+    // rejects it (already in use) do we retry with a unique alias — so provisioning
+    // never hard-fails, but the normal case uses the customer's real address.
     const password = generatePassword();
-    const r2 = await fetch(`${cwUrl}/platform/api/v1/users`, {
+    const createUser = (email: string) => fetch(`${cwUrl}/platform/api/v1/users`, {
       method: 'POST',
       headers: platHeaders,
-      body: JSON.stringify({ name, email: internalEmail, password, password_confirmation: password }),
+      body: JSON.stringify({ name, email, password, password_confirmation: password }),
     });
-    const user = await r2.json() as { id?: number; access_token?: string };
+
+    let r2 = await createUser(realEmail);
+    let user = await r2.json() as { id?: number; access_token?: string };
+    let usedEmail = realEmail;
+    if (!r2.ok || !user.id) {
+      console.warn(`[provisioning] Chatwoot user create with real email ${realEmail} failed (${r2.status}) — retrying with alias ${aliasEmail}`);
+      r2 = await createUser(aliasEmail);
+      user = await r2.json() as { id?: number; access_token?: string };
+      usedEmail = aliasEmail;
+    }
     if (!r2.ok || !user.id) {
       console.error(`[provisioning] Chatwoot create user failed: ${r2.status} ${JSON.stringify(user)}`);
+      // Roll back the orphan account we just created so it doesn't accumulate.
+      await fetch(`${cwUrl}/platform/api/v1/accounts/${accountId}`, { method: 'DELETE', headers: platHeaders }).catch(() => {});
       return null;
     }
     const userId = user.id;
     const apiKey = user.access_token ?? '';
-    console.log(`[provisioning] Chatwoot user created: id=${userId} internalEmail=${internalEmail} tenantEmail=${tenantEmail}`);
+    console.log(`[provisioning] Chatwoot user created: id=${userId} email=${usedEmail} (tenant=${tenantEmail})`);
 
     // Step 3: add user to account as administrator
     const r3 = await fetch(`${cwUrl}/platform/api/v1/accounts/${accountId}/account_users`, {
