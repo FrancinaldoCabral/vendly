@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { Layout as AntLayout, Menu, Button, Typography, Avatar, Dropdown, Alert, message, Space } from 'antd';
 import {
-  BookOutlined, CalendarOutlined, MessageOutlined,
+  BookOutlined, CalendarOutlined,
   SettingOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined,
-  UserOutlined, CommentOutlined, WhatsAppOutlined, InboxOutlined,
+  UserOutlined, CommentOutlined, WhatsAppOutlined, InboxOutlined, IdcardOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
@@ -32,7 +32,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     { key: '/connections', icon: <WhatsAppOutlined />, label: 'WhatsApp e agentes' },
     { key: '/knowledge', icon: <BookOutlined />, label: 'Conhecimento', disabled: !configured },
     { key: '/scheduled-posts', icon: <CalendarOutlined />, label: 'Postagens agendadas', disabled: !configured },
-    { key: '/conversations', icon: <MessageOutlined />, label: 'Conversas', disabled: !configured },
     { key: '/settings', icon: <SettingOutlined />, label: 'Configurações' },
   ];
 
@@ -45,8 +44,21 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const copyAccountId = async () => {
+    if (!me?._id) return;
+    try { await navigator.clipboard.writeText(me._id); message.success('ID da conta copiado!'); }
+    catch { message.info(me._id); }
+  };
+
   const userMenu = {
     items: [
+      {
+        key: 'accountId',
+        icon: <IdcardOutlined />,
+        label: <span style={{ fontSize: 12 }}>ID da conta: <Text copyable={false} style={{ fontFamily: 'monospace', fontSize: 12 }}>{me?._id ?? '—'}</Text></span>,
+        onClick: copyAccountId,
+      },
+      { type: 'divider' as const },
       {
         key: 'logout',
         icon: <LogoutOutlined />,

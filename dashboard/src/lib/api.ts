@@ -66,6 +66,10 @@ export const api = {
   updateAgent: (id: string, data: Partial<Agent>) =>
     req<Agent>(`/agents/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteAgent: (id: string) => req<{ ok: boolean }>(`/agents/${id}`, { method: 'DELETE' }),
+  clearAgentHistory: (id: string, phone?: string) =>
+    req<{ ok: boolean; scope: string; keysDeleted: number; recordsDeleted: number }>(`/agents/${id}/clear-history`, { method: 'POST', body: JSON.stringify({ phone: phone ?? '' }) }),
+  pauseAllAgents: () => req<{ ok: boolean; paused: number }>('/agents/pause-all', { method: 'POST' }),
+  resumeAllAgents: () => req<{ ok: boolean; resumed: number }>('/agents/resume-all', { method: 'POST' }),
   getAgentQr: (id: string) => req<{ base64: string | null; code: string | null }>(`/agents/${id}/qr`),
   getAgentStatus: (id: string) => req<{ agentStatus: string; connected: boolean }>(`/agents/${id}/status`),
   getContactFilter: (id: string) => req<{ contactFilter: ContactFilter }>(`/agents/${id}/contact-filter`),

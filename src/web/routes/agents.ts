@@ -35,6 +35,41 @@ async function syncFilterToRedis(instance: string, filter: ContactFilter): Promi
   }
 }
 
+/** Delete all Redis keys matching a glob pattern (scoped per tenant). */
+async function delByPattern(pattern: string): Promise<number> {
+  const redis = getRedis();
+  let deleted = 0;
+  let cursor = '0';
+  do {
+    const [next, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+    cursor = next;
+    if (keys.length) deleted += await redis.del(...keys);
+  } while (cursor !== '0');
+  return deleted;
+}
+
+// POST /api/agents/pause-all — pause every active agent (stops replies; keeps WhatsApp connected)
+agentsRouter.post('/pause-all', async (req, res) => {
+  try {
+    const tenantId = req.auth!.tenantId;
+    if (tenantId === '__admin__') { res.status(400).json({ error: 'tenant required' }); return; }
+    const db = await getDb();
+    const r = await db.collection('agents').updateMany({ tenantId, status: 'active' }, { $set: { status: 'paused', updatedAt: new Date() } });
+    res.json({ ok: true, paused: r.modifiedCount });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// POST /api/agents/resume-all — resume every paused agent
+agentsRouter.post('/resume-all', async (req, res) => {
+  try {
+    const tenantId = req.auth!.tenantId;
+    if (tenantId === '__admin__') { res.status(400).json({ error: 'tenant required' }); return; }
+    const db = await getDb();
+    const r = await db.collection('agents').updateMany({ tenantId, status: 'paused' }, { $set: { status: 'active', updatedAt: new Date() } });
+    res.json({ ok: true, resumed: r.modifiedCount });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // GET /api/agents — list agents for current tenant
 agentsRouter.get('/', async (req, res) => {
   try {
@@ -157,6 +192,39 @@ agentsRouter.put('/:agentId/contact-filter', async (req, res) => {
     if (!result) { res.status(404).json({ error: 'Agent not found' }); return; }
     await syncFilterToRedis(result.evolutionInstance ?? '', clean);
     res.json({ contactFilter: clean });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// POST /api/agents/:agentId/clear-history — wipe conversation memory for this agent.
+// Body { phone? }: if a phone is given, clears only that contact's history with the agent;
+// otherwise clears ALL of the agent's conversation history. Does NOT disconnect WhatsApp.
+agentsRouter.post('/:agentId/clear-history', async (req, res) => {
+  try {
+    const tenantId = req.auth!.tenantId;
+    if (tenantId === '__admin__') { res.status(400).json({ error: 'tenant required' }); return; }
+    const agentId = req.params.agentId;
+    const db = await getDb();
+    const agent = await db.collection('agents').findOne({ _id: agentId, tenantId } as Record<string, unknown>, { projection: { _id: 1 } });
+    if (!agent) { res.status(404).json({ error: 'Agent not found' }); return; }
+
+    const digits = String(req.body?.phone ?? '').replace(/\D/g, '');
+    const scope = digits ? `*${digits}*` : '*';
+
+    // Redis: session history, pending buffers, takeover flags, recent-message logs
+    let keysDeleted = 0;
+    keysDeleted += await delByPattern(`sessao:t:${tenantId}:${agentId}:${scope}`);
+    keysDeleted += await delByPattern(`human_takeover:t:${tenantId}:${agentId}:${scope}`);
+    if (digits) {
+      keysDeleted += await delByPattern(`buffer:t:${tenantId}:*${digits}*`);
+      keysDeleted += await delByPattern(`recent:t:${tenantId}:*${digits}*`);
+    }
+
+    // MongoDB: stored conversation records
+    const mongoFilter: Record<string, unknown> = { tenantId, agentId };
+    if (digits) mongoFilter.senderPhone = digits;
+    const del = await db.collection('conversations').deleteMany(mongoFilter);
+
+    res.json({ ok: true, scope: digits || 'all', keysDeleted, recordsDeleted: del.deletedCount });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 

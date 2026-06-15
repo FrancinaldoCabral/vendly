@@ -1,16 +1,21 @@
-import { useEffect } from 'react';
-import { Typography, Card, Form, Input, Button, Tag, message, Descriptions } from 'antd';
-import { SettingOutlined, SaveOutlined } from '@ant-design/icons';
+import { useEffect, useState } from 'react';
+import { Typography, Card, Form, Input, Button, Tag, message, Descriptions, Select, Popconfirm, Space, Alert } from 'antd';
+import { SettingOutlined, SaveOutlined, ClearOutlined, PauseCircleOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import dayjs from 'dayjs';
 
-const { Title, Paragraph } = Typography;
+const { Title, Paragraph, Text } = Typography;
 
 export default function Settings() {
   const qc = useQueryClient();
   const [form] = Form.useForm();
   const { data: me } = useQuery({ queryKey: ['me'], queryFn: api.getMe });
+  const { data: agents = [] } = useQuery({ queryKey: ['agents'], queryFn: api.getAgents });
+
+  const [clientAgent, setClientAgent] = useState<string>();
+  const [clientPhone, setClientPhone] = useState('');
+  const [allAgent, setAllAgent] = useState<string>();
 
   useEffect(() => {
     if (me) form.setFieldsValue({ name: me.name });
@@ -22,14 +27,39 @@ export default function Settings() {
     onError: (e: Error) => message.error(e.message),
   });
 
+  const clearClient = useMutation({
+    mutationFn: () => api.clearAgentHistory(clientAgent!, clientPhone.replace(/\D/g, '')),
+    onSuccess: (r) => { message.success(`Histórico do cliente apagado (${r.recordsDeleted} registros).`); setClientPhone(''); },
+    onError: (e: Error) => message.error(e.message),
+  });
+
+  const clearAll = useMutation({
+    mutationFn: () => api.clearAgentHistory(allAgent!),
+    onSuccess: (r) => message.success(`Todo o histórico do agente foi apagado (${r.recordsDeleted} registros).`),
+    onError: (e: Error) => message.error(e.message),
+  });
+
+  const pauseAll = useMutation({
+    mutationFn: () => api.pauseAllAgents(),
+    onSuccess: (r) => { qc.invalidateQueries({ queryKey: ['agents'] }); message.success(`${r.paused} agente(s) pausado(s). Eles pararam de responder.`); },
+    onError: (e: Error) => message.error(e.message),
+  });
+
+  const resumeAll = useMutation({
+    mutationFn: () => api.resumeAllAgents(),
+    onSuccess: (r) => { qc.invalidateQueries({ queryKey: ['agents'] }); message.success(`${r.resumed} agente(s) reativado(s).`); },
+    onError: (e: Error) => message.error(e.message),
+  });
+
   const planColor: Record<string, string> = { pro: 'gold', starter: 'blue', free: 'default' };
+  const agentOptions = agents.map(a => ({ value: a._id, label: a.name }));
 
   return (
     <div>
       <Title level={3} style={{ marginTop: 0 }}><SettingOutlined /> Configurações</Title>
       <Paragraph type="secondary">
-        Informações da sua conta Vendly e do plano contratado.
-        Para suporte, entre em contato em <a href="mailto:suporte@vendly.chat">suporte@vendly.chat</a>.
+        Dados da sua conta e ferramentas de manutenção. Para ver as conversas, use a
+        <b> Central de Conversas</b> (botão no topo) ou o próprio WhatsApp.
       </Paragraph>
 
       <Card title="Minha conta" style={{ marginBottom: 16 }}>
@@ -62,11 +92,56 @@ export default function Settings() {
         </Form>
       </Card>
 
-      <Card title="Identificador da conta" size="small">
-        <Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 13 }}>
-          Este é o ID da sua conta. Use-o para comunicação com o suporte.
+      <Card title="Limpar histórico de conversas" style={{ marginBottom: 16 }}>
+        <Paragraph type="secondary" style={{ fontSize: 13 }}>
+          Apaga a memória do agente para começar do zero. O agente esquece o que foi conversado —
+          útil quando ele "travou" em algo antigo ou para um novo atendimento limpo. As mensagens no
+          WhatsApp do cliente não são apagadas, só a memória interna.
         </Paragraph>
-        <Input value={me?._id ?? ''} readOnly style={{ fontFamily: 'monospace', fontSize: 13, maxWidth: 360 }} />
+
+        <Text strong style={{ fontSize: 13 }}>De um cliente específico</Text>
+        <Space.Compact style={{ display: 'flex', marginTop: 8, marginBottom: 20, maxWidth: 620, flexWrap: 'wrap' }}>
+          <Select placeholder="Escolha o agente" style={{ minWidth: 200 }} options={agentOptions}
+            value={clientAgent} onChange={setClientAgent} />
+          <Input placeholder="Número do cliente (ex.: 5511999998888)" style={{ flex: 1, minWidth: 220 }}
+            value={clientPhone} onChange={e => setClientPhone(e.target.value)} />
+          <Popconfirm title="Apagar o histórico deste cliente com este agente?" okText="Apagar" cancelText="Cancelar"
+            onConfirm={() => clearClient.mutate()}>
+            <Button danger icon={<ClearOutlined />} loading={clearClient.isPending}
+              disabled={!clientAgent || clientPhone.replace(/\D/g, '').length < 8}>Limpar</Button>
+          </Popconfirm>
+        </Space.Compact>
+
+        <div>
+          <Text strong style={{ fontSize: 13 }}>De TODOS os clientes de um agente</Text>
+          <Space style={{ display: 'flex', marginTop: 8, maxWidth: 620 }}>
+            <Select placeholder="Escolha o agente" style={{ minWidth: 200, flex: 1 }} options={agentOptions}
+              value={allAgent} onChange={setAllAgent} />
+            <Popconfirm title="Apagar TODO o histórico de conversas deste agente? Não há como desfazer." okText="Apagar tudo" cancelText="Cancelar"
+              onConfirm={() => clearAll.mutate()}>
+              <Button danger icon={<ClearOutlined />} loading={clearAll.isPending} disabled={!allAgent}>Limpar tudo</Button>
+            </Popconfirm>
+          </Space>
+        </div>
+      </Card>
+
+      <Card title="Parada total">
+        <Paragraph type="secondary" style={{ fontSize: 13 }}>
+          Pausa todos os agentes de uma vez — eles param de responder no WhatsApp imediatamente, mas
+          o número continua conectado. Use em uma emergência ou fora do horário. Depois é só reativar.
+        </Paragraph>
+        <Space>
+          <Popconfirm title="Pausar TODOS os agentes? Eles param de responder até você reativar." okText="Pausar todos" cancelText="Cancelar"
+            onConfirm={() => pauseAll.mutate()}>
+            <Button danger icon={<PauseCircleOutlined />} loading={pauseAll.isPending}>Pausar todos os agentes</Button>
+          </Popconfirm>
+          <Popconfirm title="Reativar todos os agentes pausados?" okText="Reativar" cancelText="Cancelar"
+            onConfirm={() => resumeAll.mutate()}>
+            <Button type="primary" icon={<PlayCircleOutlined />} loading={resumeAll.isPending}>Reativar todos</Button>
+          </Popconfirm>
+        </Space>
+        <Alert type="info" showIcon style={{ marginTop: 12 }}
+          message="Pausar não desconecta o WhatsApp — apenas silencia as respostas automáticas." />
       </Card>
     </div>
   );

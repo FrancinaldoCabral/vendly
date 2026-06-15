@@ -6,7 +6,6 @@ import Dashboard from './pages/Dashboard';
 import Connections from './pages/Connections';
 import KnowledgeBase from './pages/KnowledgeBase';
 import ScheduledPosts from './pages/ScheduledPosts';
-import Conversations from './pages/Conversations';
 import Settings from './pages/Settings';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -26,7 +25,7 @@ export default function App() {
           <Route path="/agents" element={<Navigate to="/connections" replace />} />
           <Route path="/knowledge" element={<PrivateRoute><KnowledgeBase /></PrivateRoute>} />
           <Route path="/scheduled-posts" element={<PrivateRoute><ScheduledPosts /></PrivateRoute>} />
-          <Route path="/conversations" element={<PrivateRoute><Conversations /></PrivateRoute>} />
+          <Route path="/conversations" element={<Navigate to="/" replace />} />
           <Route path="/settings" element={<PrivateRoute><Settings /></PrivateRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
