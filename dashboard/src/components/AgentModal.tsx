@@ -8,12 +8,24 @@ import {
 } from '@ant-design/icons';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import type { Agent, CustomApi, ContactFilter, CatalogTool } from '../lib/types';
+import type { Agent, CustomApi, ContactFilter, CatalogTool, AgentAssets } from '../lib/types';
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
 const EMPTY_FILTER: ContactFilter = { mode: 'blacklist', contacts: [], groups: [] };
+type AssetKind = 'files' | 'locations' | 'contacts';
+
+/** Coerce location lat/long to numbers and drop entries without a label. */
+function normalizeAssets(a: AgentAssets): AgentAssets {
+  return {
+    files: (a.files ?? []).filter(f => f.label && f.url),
+    locations: (a.locations ?? []).filter(l => l.label).map(l => ({
+      ...l, latitude: Number(l.latitude) || 0, longitude: Number(l.longitude) || 0,
+    })),
+    contacts: (a.contacts ?? []).filter(c => c.label && c.fullName && c.phone),
+  };
+}
 
 // ── Integrations (custom APIs) editor ────────────────────────────────────────
 
@@ -137,7 +149,61 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
 
 // ── Built-in actions (friendly switches with examples) ───────────────────────
 
-function ActionsCatalog({ value, onChange, catalog }: { value: string[]; onChange: (v: string[]) => void; catalog: CatalogTool[] }) {
+// Inline editor for an action's content (files / locations / contacts).
+function AssetEditor({ kind, assets, onChange }: { kind: AssetKind; assets: AgentAssets; onChange: (a: AgentAssets) => void }) {
+  const list = (assets[kind] ?? []) as Record<string, unknown>[];
+  const update = (items: Record<string, unknown>[]) => onChange({ ...assets, [kind]: items });
+  const setField = (i: number, field: string, val: string) => {
+    const next = list.map((it, idx) => idx === i ? { ...it, [field]: val } : it);
+    update(next);
+  };
+  const add = () => update([...list, kind === 'files' ? { label: '', url: '', mediatype: 'document' }
+    : kind === 'locations' ? { label: '', name: '', address: '', latitude: 0, longitude: 0 }
+    : { label: '', fullName: '', phone: '' }]);
+  const remove = (i: number) => update(list.filter((_, idx) => idx !== i));
+
+  const inp = (i: number, field: string, placeholder: string, flex = 1) => (
+    <Input size="small" style={{ flex }} placeholder={placeholder}
+      value={String(list[i][field] ?? '')} onChange={e => setField(i, field, e.target.value)} />
+  );
+
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px dashed #d9d9d9' }}>
+      {list.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Cadastre ao menos um item para esta ação funcionar.</Text>}
+      {list.map((_, i) => (
+        <div key={i} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6, alignItems: 'center' }}>
+          {inp(i, 'label', 'Rótulo (ex.: Cardápio)', 1)}
+          {kind === 'files' && <>
+            {inp(i, 'url', 'URL do arquivo (https://…)', 2)}
+            <Select size="small" style={{ width: 110 }} value={String(list[i].mediatype ?? 'document')}
+              onChange={v => setField(i, 'mediatype', v)}
+              options={[{ value: 'document', label: 'Documento' }, { value: 'image', label: 'Imagem' }, { value: 'video', label: 'Vídeo' }]} />
+          </>}
+          {kind === 'locations' && <>
+            {inp(i, 'name', 'Nome do local', 1)}
+            {inp(i, 'address', 'Endereço', 2)}
+            {inp(i, 'latitude', 'Latitude', 0.7)}
+            {inp(i, 'longitude', 'Longitude', 0.7)}
+          </>}
+          {kind === 'contacts' && <>
+            {inp(i, 'fullName', 'Nome do contato', 1)}
+            {inp(i, 'phone', 'Telefone (+55 31 9…)', 1)}
+          </>}
+          <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => remove(i)} />
+        </div>
+      ))}
+      <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={add}>Adicionar</Button>
+      {kind === 'locations' && (
+        <div><Text type="secondary" style={{ fontSize: 11 }}>Dica: no Google Maps, clique no local — latitude e longitude aparecem (ex.: -19.93, -43.93).</Text></div>
+      )}
+    </div>
+  );
+}
+
+function ActionsCatalog({ value, onChange, catalog, assets, onAssetsChange }: {
+  value: string[]; onChange: (v: string[]) => void; catalog: CatalogTool[];
+  assets: AgentAssets; onAssetsChange: (a: AgentAssets) => void;
+}) {
   const toggle = (id: string, on: boolean) =>
     onChange(on ? Array.from(new Set([...value, id])) : value.filter(v => v !== id));
 
@@ -148,27 +214,26 @@ function ActionsCatalog({ value, onChange, catalog }: { value: string[]; onChang
         showIcon
         style={{ marginBottom: 16 }}
         message="O que o agente pode fazer sozinho"
-        description="Ligue as ações que você autoriza. O agente decide a hora certa de usar cada uma, sozinho, conforme a conversa e as instruções que você escreveu. Tudo desligado = ele só conversa por texto."
+        description="Ligue as ações que você autoriza. O agente decide a hora certa de usar cada uma, conforme a conversa e suas instruções — você nunca precisa informar número, instância ou IDs. Tudo desligado = ele só conversa por texto."
       />
       {catalog.length === 0 && <Text type="secondary">Carregando ações…</Text>}
       {catalog.map(t => {
         const on = value.includes(t.id);
         return (
           <div key={t.id} style={{
-            display: 'flex', gap: 12, alignItems: 'flex-start',
             padding: '12px 14px', marginBottom: 8,
             border: `1px solid ${on ? '#0d9488' : '#f0f0f0'}`,
-            background: on ? '#f0fdfa' : '#fff',
-            borderRadius: 8,
+            background: on ? '#f0fdfa' : '#fff', borderRadius: 8,
           }}>
-            <Switch checked={on} onChange={c => toggle(t.id, c)} style={{ marginTop: 2 }} />
-            <div style={{ flex: 1 }}>
-              <Text strong style={{ fontSize: 14 }}>{t.label}</Text>
-              <div><Text type="secondary" style={{ fontSize: 13 }}>{t.description}</Text></div>
-              <div style={{ marginTop: 4 }}>
-                <Text style={{ fontSize: 12, color: '#0d9488' }}>💡 {t.example}</Text>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+              <Switch checked={on} onChange={c => toggle(t.id, c)} style={{ marginTop: 2 }} />
+              <div style={{ flex: 1 }}>
+                <Text strong style={{ fontSize: 14 }}>{t.label}</Text>
+                <div><Text type="secondary" style={{ fontSize: 13 }}>{t.description}</Text></div>
+                <div style={{ marginTop: 4 }}><Text style={{ fontSize: 12, color: '#0d9488' }}>💡 {t.example}</Text></div>
               </div>
             </div>
+            {on && t.asset && <AssetEditor kind={t.asset} assets={assets} onChange={onAssetsChange} />}
           </div>
         );
       })}
@@ -207,6 +272,7 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
   const [form] = Form.useForm();
   const [customApis, setCustomApis] = useState<CustomApi[]>([]);
   const [builtinTools, setBuiltinTools] = useState<string[]>([]);
+  const [assets, setAssets] = useState<AgentAssets>({});
   const [filter, setFilter] = useState<ContactFilter>(EMPTY_FILTER);
   const [prompt, setPrompt] = useState('');
   const isEdit = !!agent;
@@ -222,18 +288,20 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
         respondToAll: agent.groupConfig?.respondToAll ?? false,
       });
       setBuiltinTools(agent.builtinTools ?? []);
+      setAssets(agent.assets ?? {});
       setFilter(agent.contactFilter ?? EMPTY_FILTER);
       api.getAgent(agent._id).then(full => {
         form.setFieldsValue({ systemPrompt: full.systemPrompt });
         setPrompt(full.systemPrompt ?? '');
         setCustomApis(full.customApis ?? []);
         setBuiltinTools(full.builtinTools ?? []);
+        setAssets(full.assets ?? {});
         setFilter(full.contactFilter ?? EMPTY_FILTER);
       }).catch(() => { /* ignore */ });
     } else {
       form.resetFields();
       form.setFieldsValue({ respondToMentions: true, respondToReplies: true, respondToAll: false });
-      setCustomApis([]); setBuiltinTools([]); setFilter(EMPTY_FILTER); setPrompt('');
+      setCustomApis([]); setBuiltinTools([]); setAssets({}); setFilter(EMPTY_FILTER); setPrompt('');
     }
   }, [open, agent, form]);
 
@@ -242,8 +310,9 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
       name: vals.name as string,
       assistantName: vals.assistantName as string,
       systemPrompt: vals.systemPrompt as string,
-      tools: ['evolution', 'chatwoot'], // base capabilities, hidden from the client
+      tools: [], // messaging is handled by the platform; no raw namespaces exposed to the LLM
       builtinTools,
+      assets: normalizeAssets(assets),
       customApis,
       contactFilter: filter,
       connectionId,
@@ -323,7 +392,7 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
           {
             key: 'actions',
             label: <span><ThunderboltOutlined /> Ações</span>,
-            children: <ActionsCatalog value={builtinTools} onChange={setBuiltinTools} catalog={catalog} />,
+            children: <ActionsCatalog value={builtinTools} onChange={setBuiltinTools} catalog={catalog} assets={assets} onAssetsChange={setAssets} />,
           },
           {
             key: 'integrations',

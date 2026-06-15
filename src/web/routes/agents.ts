@@ -4,7 +4,7 @@
  */
 import { Router } from 'express';
 import { getDb } from '../../tools/mongodb.js';
-import { provisionAgent, deprovisionAgent } from '../../services/provisioning.js';
+import { provisionAgent, deprovisionAgent, type ProvisionAgentInput } from '../../services/provisioning.js';
 import { getRedis } from '../../tools/redis.js';
 import { config } from '../../config.js';
 
@@ -69,7 +69,7 @@ agentsRouter.post('/', async (req, res) => {
       res.status(400).json({ error: 'tenantId required for admin' }); return;
     }
     const { name, systemPrompt, model, tools, phone, connectionId,
-      builtinTools, assistantName, customApis, groupConfig, contactFilter } = req.body as Record<string, unknown>;
+      builtinTools, assets, assistantName, customApis, groupConfig, contactFilter } = req.body as Record<string, unknown>;
     if (!name || !systemPrompt) {
       res.status(400).json({ error: 'name e systemPrompt são obrigatórios' }); return;
     }
@@ -80,6 +80,7 @@ agentsRouter.post('/', async (req, res) => {
       model: model ? String(model) : undefined,
       tools: Array.isArray(tools) ? (tools as string[]) : undefined,
       builtinTools: Array.isArray(builtinTools) ? (builtinTools as string[]) : undefined,
+      assets: assets as ProvisionAgentInput['assets'],
       assistantName: assistantName ? String(assistantName) : undefined,
       customApis: Array.isArray(customApis) ? (customApis as unknown[]) : undefined,
       groupConfig: groupConfig as { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean } | undefined,
@@ -101,7 +102,7 @@ agentsRouter.put('/:agentId', async (req, res) => {
     if (tenantId !== '__admin__') filter.tenantId = tenantId;
 
     const allowed = ['name', 'assistantName', 'systemPrompt', 'model', 'temperature', 'maxIter', 'tools',
-      'builtinTools', 'customApis', 'groupConfig', 'contactFilter', 'priority',
+      'builtinTools', 'assets', 'customApis', 'groupConfig', 'contactFilter', 'priority',
       'escalationTeamId', 'escalationAgentId', 'status'];
     const update: Record<string, unknown> = { updatedAt: new Date() };
     for (const k of allowed) {

@@ -433,6 +433,7 @@ export async function handleEvolutionMessageWebhook(
       senderPhone,
       senderName: pushName || senderPhone || 'Usuário',
       contactJid: jid,
+      messageId: msgId, // the WhatsApp id of THIS incoming message (for reactions)
       waExternalId: bufWaExternalId, // real reply-to-bot id (groups) or null — not the msg's own id
       chatwootConvId: null, // no Chatwoot conv ID in direct Evolution path
       timestamp: Date.now(),
@@ -440,6 +441,13 @@ export async function handleEvolutionMessageWebhook(
 
     await redis.lpush(bufferKey, entry);
     await redis.expire(bufferKey, 300);
+
+    // Keep a short rolling log of recent messages (id + text) so the agent can react to
+    // any message in the conversation by referencing its text — never by raw id.
+    const recentKey = `recent:t:${tenantId}:ev:${convKey}`;
+    await redis.lpush(recentKey, JSON.stringify({ id: msgId, text: text.slice(0, 200) }));
+    await redis.ltrim(recentKey, 0, 19);
+    await redis.expire(recentKey, 60 * 60 * 24);
 
     console.log(`[ev-webhook] buffered agent=${agentId} tenant=${tenantId} jid=${jid} kind=${mediaKind ?? (userSentAudio ? 'audio' : 'text')} text="${text.slice(0, 60)}"`);
 

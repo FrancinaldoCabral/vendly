@@ -1,105 +1,97 @@
 /**
- * tool-catalog.ts — Curated, brand-free catalog of built-in tools a client can
- * enable per agent. Labels are written for business owners, NOT programmers:
- * no mention of Evolution / Chatwoot / APIs. Each id maps to a real built-in tool.
- *
- * The dashboard renders these as friendly toggles with teaching captions.
+ * tool-catalog.ts — Curated, brand-free catalog of actions an agent can perform
+ * during a conversation. Written for business owners (no Evolution/Chatwoot/API
+ * jargon). Each action exposes to the LLM ONLY the content it must decide; the
+ * platform injects the rest (which WhatsApp, the contact's number, message id…)
+ * in agent-loop. Actions that need content the agent can't invent (a file, an
+ * address, a contact card) draw from per-agent "assets" the client configures.
  */
 
+export type AssetKind = 'files' | 'locations' | 'contacts';
+
 export interface CatalogTool {
-  id: string;            // real built-in tool name (used by agent-loop)
-  label: string;         // friendly name shown in the UI
-  description: string;   // teaching caption
-  example: string;       // "quando usar" — a concrete situation for the customer
-  category: string;      // grouping in the UI
-  behavior: 'void';      // these run and the agent confirms (no payload back to the model)
+  id: string;            // tool name exposed to the LLM
+  label: string;         // friendly name in the UI
+  description: string;   // what it does
+  example: string;       // 💡 when the agent would use it
+  category: string;      // UI grouping
+  /** If set, this action picks from the agent's configured assets of this kind. */
+  asset?: AssetKind;
+  /** JSON-schema of what the LLM provides. Dynamic enums (asset labels) are filled at runtime. */
+  params: Record<string, unknown>;
 }
 
 export const TOOL_CATALOG: CatalogTool[] = [
-  // ── Mensagens ricas ────────────────────────────────────────────────────────
   {
-    id: 'evolution_send_media',
-    label: 'Enviar imagem, vídeo ou arquivo',
-    description: 'O agente envia fotos, vídeos ou documentos quando a conversa pedir.',
-    example: 'O cliente pede o cardápio → o agente manda o PDF do cardápio.',
-    category: 'Mensagens',
-    behavior: 'void',
-  },
-  {
-    id: 'evolution_send_audio',
-    label: 'Enviar áudio (mensagem de voz)',
-    description: 'O agente responde com uma mensagem de voz quando fizer sentido.',
-    example: 'O cliente manda um áudio → o agente responde também em áudio.',
-    category: 'Mensagens',
-    behavior: 'void',
-  },
-  {
-    id: 'evolution_send_sticker',
-    label: 'Enviar figurinha',
-    description: 'Deixa o atendimento mais leve com figurinhas nos momentos certos.',
-    example: 'Ao fechar um pedido, o agente manda uma figurinha comemorando.',
-    category: 'Mensagens',
-    behavior: 'void',
-  },
-  {
-    id: 'evolution_send_reaction',
-    label: 'Reagir a uma mensagem',
-    description: 'O agente reage com um emoji (👍 ❤️ 😂) à mensagem do cliente.',
-    example: 'O cliente confirma o endereço → o agente reage com 👍.',
-    category: 'Mensagens',
-    behavior: 'void',
-  },
-  // ── Negócio ─────────────────────────────────────────────────────────────────
-  {
-    id: 'evolution_send_location',
-    label: 'Enviar localização no mapa',
-    description: 'O agente compartilha um endereço direto no mapa.',
-    example: 'O cliente pergunta onde fica a loja → o agente envia o ponto no mapa.',
-    category: 'Negócio',
-    behavior: 'void',
-  },
-  {
-    id: 'evolution_send_contact',
-    label: 'Compartilhar um contato',
-    description: 'O agente envia um cartão de contato (telefone de alguém).',
-    example: 'O cliente quer falar com o financeiro → o agente envia o contato dele.',
-    category: 'Negócio',
-    behavior: 'void',
-  },
-  {
-    id: 'evolution_send_poll',
+    id: 'acao_enviar_enquete',
     label: 'Criar uma enquete',
-    description: 'O agente cria uma enquete para o cliente escolher uma opção.',
+    description: 'O agente cria uma enquete (votação) para o cliente escolher uma opção. O agente monta a pergunta e as opções conforme a conversa.',
     example: 'Para agendar, o agente manda uma enquete com os horários disponíveis.',
-    category: 'Negócio',
-    behavior: 'void',
+    category: 'Durante a conversa',
+    params: {
+      type: 'object',
+      required: ['pergunta', 'opcoes'],
+      properties: {
+        pergunta: { type: 'string', description: 'A pergunta da enquete' },
+        opcoes: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 12, description: 'As opções de resposta' },
+        multipla: { type: 'boolean', description: 'Permitir escolher mais de uma opção (padrão: não)' },
+      },
+    },
   },
   {
-    id: 'evolution_check_number',
-    label: 'Verificar número de WhatsApp',
-    description: 'O agente confere se um número existe no WhatsApp.',
-    example: 'Antes de cadastrar um contato, confere se o número é válido.',
-    category: 'Negócio',
-    behavior: 'void',
-  },
-  // ── Atendimento ──────────────────────────────────────────────────────────────
-  {
-    id: 'chatwoot_assign_conversation',
-    label: 'Chamar um atendente humano',
-    description: 'O agente passa a conversa para a sua equipe quando precisa de uma pessoa.',
-    example: 'O cliente pede para falar com um humano → o agente transfere para a equipe.',
-    category: 'Atendimento',
-    behavior: 'void',
+    id: 'acao_reagir',
+    label: 'Reagir com emoji',
+    description: 'O agente reage com um emoji a uma mensagem da conversa (por padrão, a última). Pode reagir a uma mensagem anterior informando um trecho dela.',
+    example: 'O cliente confirma o endereço → o agente reage com 👍. Ou dá um 👍 numa mensagem específica que ele citar.',
+    category: 'Durante a conversa',
+    params: {
+      type: 'object',
+      required: ['emoji'],
+      properties: {
+        emoji: { type: 'string', description: 'Um único emoji, ex.: 👍 ❤️ 🎉' },
+        referencia: { type: 'string', description: 'Opcional: um trecho do texto da mensagem a reagir, se não for a última.' },
+      },
+    },
   },
   {
-    id: 'chatwoot_update_conversation_status',
-    label: 'Encerrar o atendimento',
-    description: 'O agente marca a conversa como resolvida quando o assunto termina.',
-    example: 'O pedido foi concluído e o cliente agradeceu → o agente encerra.',
-    category: 'Atendimento',
-    behavior: 'void',
+    id: 'acao_enviar_arquivo',
+    label: 'Enviar um arquivo (imagem, vídeo ou documento)',
+    description: 'O agente envia um dos arquivos que você cadastrou (ex.: cardápio, catálogo, tabela de preços).',
+    example: 'O cliente pede o cardápio → o agente envia o PDF do cardápio.',
+    category: 'Conteúdo cadastrado',
+    asset: 'files',
+    params: {
+      type: 'object',
+      required: ['arquivo'],
+      properties: { arquivo: { type: 'string', description: 'Qual arquivo enviar (use exatamente um dos rótulos disponíveis)' } },
+    },
+  },
+  {
+    id: 'acao_enviar_localizacao',
+    label: 'Enviar uma localização no mapa',
+    description: 'O agente envia um dos endereços que você cadastrou, como ponto no mapa.',
+    example: 'O cliente pergunta onde fica a loja → o agente envia a localização.',
+    category: 'Conteúdo cadastrado',
+    asset: 'locations',
+    params: {
+      type: 'object',
+      required: ['local'],
+      properties: { local: { type: 'string', description: 'Qual local enviar (use exatamente um dos rótulos disponíveis)' } },
+    },
+  },
+  {
+    id: 'acao_enviar_contato',
+    label: 'Compartilhar um contato',
+    description: 'O agente compartilha um dos contatos que você cadastrou (ex.: financeiro, suporte, um vendedor).',
+    example: 'O cliente quer falar com o financeiro → o agente envia o contato dele.',
+    category: 'Conteúdo cadastrado',
+    asset: 'contacts',
+    params: {
+      type: 'object',
+      required: ['contato'],
+      properties: { contato: { type: 'string', description: 'Qual contato enviar (use exatamente um dos rótulos disponíveis)' } },
+    },
   },
 ];
 
-/** Real tool ids that exist in the curated catalog (for validation). */
-export const CATALOG_IDS = new Set(TOOL_CATALOG.map(t => t.id));
+export const CATALOG_BY_ID = new Map(TOOL_CATALOG.map(t => [t.id, t]));

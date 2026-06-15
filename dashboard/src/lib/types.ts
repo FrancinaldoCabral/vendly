@@ -35,13 +35,19 @@ export interface ContactFilter {
   groups: string[];
 }
 
+export interface AgentAssets {
+  files?: { label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }[];
+  locations?: { label: string; name: string; address: string; latitude: number; longitude: number }[];
+  contacts?: { label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }[];
+}
+
 export interface CatalogTool {
   id: string;
   label: string;
   description: string;
   example: string;
   category: string;
-  behavior: string;
+  asset?: 'files' | 'locations' | 'contacts';
 }
 
 export interface GroupConfig {
@@ -61,6 +67,7 @@ export interface Agent {
   systemPrompt?: string;
   tools: string[];
   builtinTools?: string[];
+  assets?: AgentAssets;
   customApis: CustomApi[];
   groupConfig?: GroupConfig;
   contactFilter?: ContactFilter;

@@ -6,6 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { getRedis } from '../tools/redis.js';
+import { CATALOG_BY_ID } from './tool-catalog.js';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { n8nTools, handleN8nTool } from '../tools/n8n.js';
 import { evolutionTools, handleEvolutionTool } from '../tools/evolution.js';
@@ -46,14 +47,23 @@ export interface CustomApi {
   waitingMessage?: string;
 }
 
+/** Per-agent content the actions draw from (never invented by the LLM). */
+export interface AgentAssets {
+  files?: { label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }[];
+  locations?: { label: string; name: string; address: string; latitude: number; longitude: number }[];
+  contacts?: { label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }[];
+}
+
 export interface AgentConfig {
   model: string;
   temperature?: number;
   maxIter?: number;
-  /** Built-in tool namespaces enabled for this agent, e.g. ['evolution', 'chatwoot', 'mongo'] */
+  /** Built-in tool namespaces (advanced/admin). Messaging namespaces are never exposed to the LLM. */
   tools: string[];
-  /** Granular built-in tools picked from the friendly catalog, e.g. ['evolution_send_location']. */
+  /** Enabled curated actions from the catalog, e.g. ['acao_enviar_enquete']. */
   builtinTools?: string[];
+  /** Configured content the actions use. */
+  assets?: AgentAssets;
   customApis: CustomApi[];
   chatwootAccountId?: string;
 }
@@ -63,7 +73,9 @@ export interface AgentLoopContext {
   tenantId: string;
   instance: string;
   senderPhone: string;
-  contactJid?: string;        // needed to deliver async tool follow-ups to the right chat
+  contactJid?: string;        // the ONLY destination actions may target (current contact)
+  lastMessageId?: string;     // id of the contact's last message (for reactions)
+  recentMessages?: { id: string; text: string }[]; // recent chat messages (react to any by snippet)
   chatwootConvId?: number;
   messages: OpenRouterMessage[];
   agent: AgentConfig;
@@ -113,25 +125,109 @@ const BUSCAR_MEMORIA_TOOL = {
   },
 };
 
-const ALL_BUILTIN_TOOLS: Tool[] = Object.values(BUILTIN_NAMESPACES).flat();
+/** Clone an action's param schema and fill the asset-select property's enum with available labels. */
+function withAssetEnum(params: Record<string, unknown>, labels: string[]): Record<string, unknown> {
+  const clone = JSON.parse(JSON.stringify(params)) as { properties?: Record<string, Record<string, unknown>> };
+  const props = clone.properties ?? {};
+  for (const key of Object.keys(props)) {
+    props[key] = { ...props[key], enum: labels };
+  }
+  return clone as Record<string, unknown>;
+}
 
 function buildToolList(agent: AgentConfig) {
-  // Namespace-level enabling (legacy / power users) + granular catalog picks.
-  const byNamespace = agent.tools.flatMap(ns => BUILTIN_NAMESPACES[ns] ?? []);
-  const granularIds = new Set(agent.builtinTools ?? []);
-  const byGranular = granularIds.size ? ALL_BUILTIN_TOOLS.filter(t => granularIds.has(t.name)) : [];
+  const tools: Array<{ type: 'function'; function: { name: string; description: string; parameters: unknown } }> = [BUSCAR_MEMORIA_TOOL];
 
-  // Dedupe by tool name
-  const seen = new Set<string>();
-  const builtins = [...byNamespace, ...byGranular]
-    .filter(t => (seen.has(t.name) ? false : (seen.add(t.name), true)))
-    .map(mcpToOpenRouterTool);
+  // Curated actions — sensitive fields (instance, destination number, message id) are
+  // NEVER exposed; they are injected at execution from the conversation context.
+  for (const id of agent.builtinTools ?? []) {
+    const cat = CATALOG_BY_ID.get(id);
+    if (!cat) continue;
+    let params = cat.params;
+    if (cat.asset) {
+      const labels = (agent.assets?.[cat.asset] ?? []).map(a => a.label).filter(Boolean);
+      if (labels.length === 0) continue; // enabled but nothing configured → don't offer it
+      params = withAssetEnum(cat.params, labels);
+    }
+    tools.push({ type: 'function', function: { name: cat.id, description: `${cat.description} ${cat.example}`, parameters: params } });
+  }
+
+  // Advanced namespaces (admin only). Messaging namespaces are intentionally excluded so the
+  // LLM can never send to an arbitrary number/instance.
+  const safe = (agent.tools ?? []).filter(ns => ns !== 'evolution' && ns !== 'chatwoot');
+  const nsTools = safe.flatMap(ns => BUILTIN_NAMESPACES[ns] ?? []).map(mcpToOpenRouterTool);
+  tools.push(...nsTools);
 
   const customs = agent.customApis.map(api => ({
     type: 'function' as const,
     function: { name: api.name, description: api.description, parameters: api.schema },
   }));
-  return [BUSCAR_MEMORIA_TOOL, ...builtins, ...customs];
+  tools.push(...customs);
+  return tools;
+}
+
+/** Build the real Evolution call for a curated action, injecting ALL sensitive fields from ctx. */
+function buildCatalogCall(
+  id: string,
+  ctx: { instance: string; contactJid?: string; senderPhone: string; lastMessageId?: string; recentMessages?: { id: string; text: string }[] },
+  args: Record<string, unknown>,
+  assets: AgentAssets | undefined,
+): { name: string; payload: Record<string, unknown> } | { error: string } {
+  const instanceName = ctx.instance;
+  const number = ctx.contactJid || ctx.senderPhone; // destination = current contact ONLY
+  if (!number) return { error: 'sem destinatário' };
+
+  switch (id) {
+    case 'acao_enviar_enquete': {
+      const opcoes = Array.isArray(args.opcoes) ? (args.opcoes as unknown[]).map(String) : [];
+      if (!args.pergunta || opcoes.length < 2) return { error: 'enquete precisa de pergunta e 2+ opções' };
+      return { name: 'evolution_send_poll', payload: {
+        instanceName, number, name: String(args.pergunta),
+        selectableCount: args.multipla ? Math.max(1, opcoes.length) : 1, values: opcoes,
+      } };
+    }
+    case 'acao_reagir': {
+      // Default: react to the last message. If the agent passed a snippet ("referencia"),
+      // find the most recent message containing that text and react to THAT one instead.
+      let messageId = ctx.lastMessageId;
+      const ref = args.referencia ? String(args.referencia).toLowerCase().trim() : '';
+      if (ref) {
+        const found = (ctx.recentMessages ?? []).find(m => (m.text ?? '').toLowerCase().includes(ref));
+        if (found) messageId = found.id;
+      }
+      if (!messageId) return { error: 'não há mensagem para reagir' };
+      return { name: 'evolution_send_reaction', payload: {
+        instanceName, remoteJid: number, fromMe: false, messageId, reaction: String(args.emoji ?? ''),
+      } };
+    }
+    case 'acao_enviar_arquivo': {
+      const f = (assets?.files ?? []).find(x => x.label === args.arquivo);
+      if (!f) return { error: `arquivo "${String(args.arquivo)}" não cadastrado` };
+      return { name: 'evolution_send_media', payload: {
+        instanceName, number, mediatype: f.mediatype || 'document', media: f.url,
+        mimetype: f.mimetype, fileName: f.fileName || f.label, caption: f.caption,
+      } };
+    }
+    case 'acao_enviar_localizacao': {
+      const l = (assets?.locations ?? []).find(x => x.label === args.local);
+      if (!l) return { error: `local "${String(args.local)}" não cadastrado` };
+      return { name: 'evolution_send_location', payload: {
+        instanceName, number, name: l.name, address: l.address, latitude: l.latitude, longitude: l.longitude,
+      } };
+    }
+    case 'acao_enviar_contato': {
+      const c = (assets?.contacts ?? []).find(x => x.label === args.contato);
+      if (!c) return { error: `contato "${String(args.contato)}" não cadastrado` };
+      const digits = String(c.phone ?? '').replace(/\D/g, '');
+      return { name: 'evolution_send_contact', payload: {
+        instanceName, number, contact: [{
+          fullName: c.fullName, wuid: digits, phoneNumber: c.phone,
+          organization: c.organization ?? '', email: c.email ?? '', url: c.url ?? '',
+        }],
+      } };
+    }
+  }
+  return { error: 'ação desconhecida' };
 }
 
 // ── Routing ──────────────────────────────────────────────────────────────────
@@ -390,6 +486,24 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
       try {
         if (toolName === 'buscar_memoria') {
           content = await executeBuscarMemoria(String(args.query ?? ''), agentId, apiKey);
+        } else if (CATALOG_BY_ID.has(toolName)) {
+          // Curated action — inject instance/destination/message id from context; the LLM
+          // only chose the content. The destination is ALWAYS the current contact.
+          const built = buildCatalogCall(
+            toolName,
+            { instance, contactJid: ctx.contactJid, senderPhone, lastMessageId: ctx.lastMessageId, recentMessages: ctx.recentMessages },
+            args,
+            agent.assets,
+          );
+          const label = CATALOG_BY_ID.get(toolName)?.label ?? toolName;
+          if ('error' in built) {
+            content = `Não foi possível executar "${label}": ${built.error}. Avise o cliente com naturalidade.`;
+          } else {
+            const raw = await routeBuiltinTool(built.name, built.payload);
+            content = raw.startsWith('❌')
+              ? `A ação "${label}" falhou. Avise o cliente com gentileza, sem detalhes técnicos.`
+              : `Ação "${label}" realizada com sucesso. Confirme ao cliente de forma natural e curta.`;
+          }
         } else {
           // Check if it's a custom API
           const customApi = agent.customApis.find(a => a.name === toolName);

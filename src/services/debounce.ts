@@ -11,7 +11,7 @@ import { groupFilter, type GroupConfig } from './group-filter.js';
 import { generateTts, buildMediaContentPart, type MediaKind } from './media.js';
 
 const DEBOUNCE_MS = 12_000; // 12 s — allows for back-to-back typing before processing
-const HISTORY_MAX = 40; // message pairs kept in Redis session
+const MAX_STORED_MESSAGES = 500; // hard safety cap on stored turns (summary keeps meaning)
 
 // Appended to every agent's system prompt — not overridable per agent.
 // Teaches the LLM to output short WhatsApp-style messages separated by blank lines.
@@ -71,6 +71,11 @@ interface AgentDoc {
   maxIter?: number;
   tools?: string[];
   builtinTools?: string[];
+  assets?: {
+    files?: Array<{ label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }>;
+    locations?: Array<{ label: string; name: string; address: string; latitude: number; longitude: number }>;
+    contacts?: Array<{ label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }>;
+  };
   customApis?: Array<{
     name: string;
     description: string;
@@ -143,6 +148,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     senderName?: string;
     senderPhone?: string;
     contactJid?: string;
+    messageId?: string;      // WA id of the incoming message (for reactions)
     waExternalId?: string;
     chatwootConvId?: number;
     timestamp?: number;
@@ -225,6 +231,18 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   if (sessionRaw) {
     try { history = JSON.parse(sessionRaw) as OpenRouterMessage[]; } catch { /**/ }
   }
+  const chatModel = agentDoc.model ?? config.openrouter.chatModel;
+  // Keep a long memory; collapse older turns into a summary only when the window fills up.
+  history = await summarizeIfNeeded(history, agentDoc.systemPrompt, chatModel);
+
+  // Recent messages (id + text) so the agent can react to any message by snippet
+  let recentMessages: { id: string; text: string }[] = [];
+  try {
+    const raw = await redis.lrange(`recent:t:${tenantId}:${conversationId}`, 0, 19);
+    recentMessages = raw.map(r => { try { return JSON.parse(r) as { id: string; text: string }; } catch { return null; } })
+      .filter((x): x is { id: string; text: string } => !!x && !!x.id);
+  } catch { /* ignore */ }
+  const lastMessageId = lastEntry.messageId ?? recentMessages[0]?.id;
 
   // Did the client speak (or ask for) audio? → mirror the reply in audio.
   const userSentAudio = entries.some(e => e.userSentAudio);
@@ -272,14 +290,17 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     instance,
     senderPhone,
     contactJid,
+    lastMessageId,
+    recentMessages,
     chatwootConvId,
     messages,
     agent: {
-      model: agentDoc.model ?? config.openrouter.chatModel,
+      model: chatModel,
       temperature: agentDoc.temperature,
       maxIter: agentDoc.maxIter,
-      tools: agentDoc.tools ?? ['evolution', 'chatwoot'],
+      tools: agentDoc.tools ?? [],
       builtinTools: agentDoc.builtinTools ?? [],
+      assets: agentDoc.assets,
       customApis: agentDoc.customApis ?? [],
       chatwootAccountId: cwAccountId,
     },
@@ -359,14 +380,18 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     console.log(`[debounce] ESCALATED agent=${agentId} conv=${conversationId}`);
   }
 
-  // Update session history (JID-based key for unified history)
-  const newHistory: OpenRouterMessage[] = [
+  // Update session history. Store the user turn as TEXT (never the base64 media bytes —
+  // the model already saw them this turn; persisting them would bloat Redis and the window).
+  const userHistoryText = consolidatedText
+    || (mediaEntries.length ? '[o cliente enviou um arquivo/mídia]' : (userSentAudio ? '[o cliente enviou um áudio]' : ''));
+  let newHistory: OpenRouterMessage[] = [
     ...history,
-    { role: 'user', content: userContent },
+    { role: 'user', content: userHistoryText },
     { role: 'assistant', content },
   ];
-  const trimmed = trimHistory(newHistory, HISTORY_MAX);
-  await redis.set(activeSessionKey, JSON.stringify(trimmed), 'EX', 60 * 60 * 24 * 7); // 7 days
+  newHistory = await summarizeIfNeeded(newHistory, agentDoc.systemPrompt, chatModel);
+  newHistory = capHistory(newHistory);
+  await redis.set(activeSessionKey, JSON.stringify(newHistory), 'EX', 60 * 60 * 24 * 7); // 7 days
 
   // Persist conversation record
   await db.collection('conversations').insertOne({
@@ -464,8 +489,9 @@ export async function handleToolResult(token: string, resultText: string): Promi
     await syncChatwootOutgoing(p.chatwootConvId, content, cwAccountId, cwApiKey);
   }
 
-  const newHistory: OpenRouterMessage[] = [...history, { role: 'user', content: note }, { role: 'assistant', content }];
-  await redis.set(activeSessionKey, JSON.stringify(trimHistory(newHistory, HISTORY_MAX)), 'EX', 60 * 60 * 24 * 7);
+  let newHistory: OpenRouterMessage[] = [...history, { role: 'user', content: note }, { role: 'assistant', content }];
+  newHistory = capHistory(await summarizeIfNeeded(newHistory, agentDoc.systemPrompt, agentDoc.model ?? config.openrouter.chatModel));
+  await redis.set(activeSessionKey, JSON.stringify(newHistory), 'EX', 60 * 60 * 24 * 7);
   console.log(`[tool-result] delivered token=${token} agent=${p.agentId} chunks=${chunks.length}`);
 }
 
@@ -518,11 +544,74 @@ function splitLongText(text: string, maxLen: number): string[] {
   return result.length > 0 ? result : [text.slice(0, maxLen)];
 }
 
-function trimHistory(history: OpenRouterMessage[], maxPairs: number): OpenRouterMessage[] {
-  // Keep only the last maxPairs user+assistant pairs (non-system messages)
-  const pairs = history.filter(m => m.role === 'user' || m.role === 'assistant');
-  if (pairs.length <= maxPairs * 2) return history;
-  return pairs.slice(-maxPairs * 2);
+// ── Context window management ────────────────────────────────────────────────
+
+/** Rough token estimate (~4 chars/token). Good enough to decide when to summarize. */
+function estimateTokens(messages: unknown): number {
+  return Math.ceil(JSON.stringify(messages).length / 4);
+}
+
+/** Hard safety cap on stored turns, preserving a leading summary if present. */
+function capHistory(history: OpenRouterMessage[]): OpenRouterMessage[] {
+  if (history.length <= MAX_STORED_MESSAGES) return history;
+  const head = history[0]?.role === 'system' ? [history[0]] : [];
+  return [...head, ...history.slice(-(MAX_STORED_MESSAGES - head.length))];
+}
+
+/**
+ * Keep a long memory but collapse older turns into a concise summary once the window
+ * (system prompt + history) reaches the configured ratio of the model's capacity
+ * (default 70% of ~1M tokens). The most recent turns are always kept verbatim.
+ */
+async function summarizeIfNeeded(
+  history: OpenRouterMessage[],
+  systemPrompt: string,
+  model: string,
+): Promise<OpenRouterMessage[]> {
+  const threshold = Math.floor(config.openrouter.contextWindowTokens * config.openrouter.summarizeAtRatio);
+  const est = estimateTokens([{ role: 'system', content: systemPrompt }, ...history]);
+  if (est < threshold) return history;
+
+  const KEEP_RECENT = 16;
+  if (history.length <= KEEP_RECENT + 2) return history; // too short to compress meaningfully
+  const head = history.slice(0, history.length - KEEP_RECENT);
+  const tail = history.slice(history.length - KEEP_RECENT);
+
+  const summary = await callSummary(head, model);
+  if (!summary) return history; // fail-safe: keep full history if summarization fails
+  console.log(`[debounce] history summarized: ~${est} tokens >= ${threshold} → kept ${tail.length} recent turns + summary`);
+  return [{ role: 'system', content: `[Resumo da conversa anterior — preserve estes fatos]\n${summary}` }, ...tail];
+}
+
+async function callSummary(messages: OpenRouterMessage[], model: string): Promise<string> {
+  if (!config.openrouter.apiKey) return '';
+  const convo = messages
+    .map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : '[conteúdo não-textual]'}`)
+    .join('\n')
+    .slice(0, 200_000);
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 60_000);
+  try {
+    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'Authorization': `Bearer ${config.openrouter.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: 'Resuma a conversa a seguir de forma concisa, em português, preservando TODOS os fatos necessários para continuar o atendimento: nome e dados do cliente, preferências, decisões tomadas, pedidos/itens, valores, combinações e pendências. Não invente nada. Não adicione comentários — devolva só o resumo.' },
+          { role: 'user', content: convo },
+        ],
+      }),
+    });
+    if (!r.ok) return '';
+    const data = await r.json() as { choices?: Array<{ message?: { content?: string } }> };
+    return (data.choices?.[0]?.message?.content ?? '').trim();
+  } catch {
+    return '';
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 async function sendEvolutionText(instance: string, jid: string, text: string): Promise<void> {
