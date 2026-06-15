@@ -36,12 +36,16 @@ export interface ContactFilter {
 }
 
 export interface AgentAssets {
-  polls?: { label: string; question: string; options: string[]; multiple?: boolean }[];
-  reactions?: string[];
+  menus?: { label: string; intro?: string; options: string[] }[];
+  reactions?: { label: string; emoji: string }[];
+  stickers?: { label: string; url: string }[];
+  labels?: { label: string }[];
   files?: { label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }[];
   locations?: { label: string; name: string; address: string; latitude: number; longitude: number }[];
   contacts?: { label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }[];
 }
+
+export type AssetKind = 'menus' | 'reactions' | 'stickers' | 'labels' | 'files' | 'locations' | 'contacts';
 
 export interface CatalogTool {
   id: string;
@@ -49,7 +53,8 @@ export interface CatalogTool {
   description: string;
   example: string;
   category: string;
-  asset?: 'files' | 'locations' | 'contacts';
+  asset?: AssetKind;
+  assetParam?: string;
 }
 
 export interface GroupConfig {

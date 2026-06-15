@@ -47,19 +47,20 @@ export interface CustomApi {
   waitingMessage?: string;
 }
 
-/** Per-agent content the actions draw from (never invented by the LLM). */
+/** Per-agent content the actions draw from (never invented by the LLM). Everything is labeled. */
 export interface AgentAssets {
-  polls?: { label: string; question: string; options: string[]; multiple?: boolean }[];
-  reactions?: string[]; // allowed emojis
+  menus?: { label: string; intro?: string; options: string[] }[];
+  reactions?: { label: string; emoji: string }[];
+  stickers?: { label: string; url: string }[];
+  labels?: { label: string }[]; // CRM conversation labels
   files?: { label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }[];
   locations?: { label: string; name: string; address: string; latitude: number; longitude: number }[];
   contacts?: { label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }[];
 }
 
-/** Allowed values for an action's selector (item labels, or the emojis themselves). */
+/** Allowed values for an action's selector — always the configured item labels. */
 function assetValues(kind: string, assets: AgentAssets | undefined): string[] {
   if (!assets) return [];
-  if (kind === 'reactions') return (assets.reactions ?? []).filter(Boolean);
   const list = (assets as Record<string, Array<{ label?: string }>>)[kind] ?? [];
   return list.map(i => i.label ?? '').filter(Boolean);
 }
@@ -95,6 +96,8 @@ export interface AgentLoopResult {
   content: string;
   toolCallsMade: boolean;
   escalate: boolean;
+  /** CRM labels the agent applied to the current conversation (applied post-loop by the caller). */
+  labels?: string[];
 }
 
 // ── Built-in tool registry ───────────────────────────────────────────────────
@@ -182,30 +185,39 @@ function buildCatalogCall(
   if (!number) return { error: 'sem destinatário' };
 
   switch (id) {
-    case 'acao_enviar_enquete': {
-      const poll = (assets?.polls ?? []).find(p => p.label === args.enquete);
-      if (!poll) return { error: `enquete "${String(args.enquete)}" não cadastrada` };
-      const opcoes = (poll.options ?? []).map(String).filter(Boolean);
-      if (opcoes.length < 2) return { error: `enquete "${poll.label}" precisa de 2+ opções` };
-      return { name: 'evolution_send_poll', payload: {
-        instanceName, number, name: poll.question,
-        selectableCount: poll.multiple ? Math.max(1, opcoes.length) : 1, values: opcoes,
-      } };
+    case 'acao_enviar_menu': {
+      const menu = (assets?.menus ?? []).find(m => m.label === args.menu);
+      if (!menu) return { error: `menu "${String(args.menu)}" não cadastrado` };
+      const opcoes = (menu.options ?? []).map(String).filter(Boolean);
+      if (opcoes.length < 2) return { error: `menu "${menu.label}" precisa de 2+ opções` };
+      // A numbered text menu — the most reliable cross-context "pick an option" UX.
+      const numbered = opcoes.map((o, i) => `${i + 1}. ${o}`);
+      const text = [menu.intro?.trim(), ...numbered].filter(Boolean).join('\n');
+      return { name: 'evolution_send_text', payload: { instanceName, number, text } };
     }
     case 'acao_reagir': {
-      const emoji = String(args.emoji ?? '');
-      if (!(assets?.reactions ?? []).includes(emoji)) return { error: `emoji "${emoji}" não permitido` };
+      const rcfg = (assets?.reactions ?? []).find(r => r.label === args.reacao);
+      if (!rcfg || !rcfg.emoji) return { error: `reação "${String(args.reacao)}" não cadastrada` };
+      const emoji = rcfg.emoji;
       // Default: react to the last message. If the agent passed a snippet, react to that one.
       let messageId = ctx.lastMessageId;
       const ref = args.referencia ? String(args.referencia).toLowerCase().trim() : '';
       if (ref) {
-        const found = (ctx.recentMessages ?? []).find(m => (m.text ?? '').toLowerCase().includes(ref));
+        const found = (ctx.recentMessages ?? []).find(m => {
+          const t = (m.text ?? '').toLowerCase();
+          return t.includes(ref) || (ref.length > 8 && t.length > 3 && ref.includes(t));
+        });
         if (found) messageId = found.id;
       }
       if (!messageId) return { error: 'não há mensagem para reagir' };
       return { name: 'evolution_send_reaction', payload: {
         instanceName, remoteJid: number, fromMe: false, messageId, reaction: emoji,
       } };
+    }
+    case 'acao_enviar_figurinha': {
+      const s = (assets?.stickers ?? []).find(x => x.label === args.figurinha);
+      if (!s || !s.url) return { error: `figurinha "${String(args.figurinha)}" não cadastrada` };
+      return { name: 'evolution_send_sticker', payload: { instanceName, number, sticker: s.url } };
     }
     case 'acao_enviar_arquivo': {
       const f = (assets?.files ?? []).find(x => x.label === args.arquivo);
@@ -404,6 +416,11 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
   let finalContent: string | null = null;
   let toolCallsMade = false;
   const ctxLog: string[] = [];
+  // CRM labels the agent chose to apply (resolved post-loop by the caller).
+  const appliedLabels = new Set<string>();
+  // Text the model emits ALONGSIDE a tool call would otherwise be dropped (only the
+  // final, tool-free message is returned). Collect it so nothing the agent "said" is lost.
+  const preTexts: string[] = [];
 
   type LLMChoice = {
     finish_reason?: string;
@@ -480,6 +497,10 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
     // Execute tool calls
     toolCallsMade = true;
     const assistantMsg = choice!.message!;
+    // Capture any user-facing text the model wrote together with its tool call(s),
+    // so it isn't lost (only the final tool-free message would otherwise be sent).
+    const interim = typeof assistantMsg.content === 'string' ? assistantMsg.content.trim() : '';
+    if (interim && preTexts[preTexts.length - 1] !== interim) preTexts.push(interim);
     const toolResults: Array<{ role: string; tool_call_id: string; content: string }> = [];
     const toolNames = toolCalls.map(tc => tc.function?.name ?? '?').join(',');
     console.log(`[agent-loop] model=${modelInUse} iter=${iter} ctx=${ctxChars}chars agent=${agentId} tenant=${tenantId} tools=[${toolNames}]`);
@@ -493,6 +514,16 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
       try {
         if (toolName === 'buscar_memoria') {
           content = await executeBuscarMemoria(String(args.query ?? ''), agentId, apiKey);
+        } else if (toolName === 'acao_etiquetar') {
+          // CRM label — not a WhatsApp send. Validate against configured labels and queue
+          // it; the caller applies it to the conversation after the loop. Invisible to the contact.
+          const cfg = (agent.assets?.labels ?? []).find(l => l.label === args.etiqueta);
+          if (!cfg) {
+            content = `Não foi possível etiquetar: "${String(args.etiqueta)}" não está cadastrada. NÃO comente isso com o cliente.`;
+          } else {
+            appliedLabels.add(cfg.label);
+            content = `Conversa etiquetada como "${cfg.label}". Isso é interno (CRM) — NÃO comente com o cliente; apenas continue o atendimento normalmente.`;
+          }
         } else if (CATALOG_BY_ID.has(toolName)) {
           // Curated action — inject instance/destination/message id from context; the LLM
           // only chose the content. The destination is ALWAYS the current contact.
@@ -578,8 +609,11 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
     currentBody = { ...currentBody, messages: [...prevMsgs, assistantMsg, ...toolResults] };
   }
 
-  const content = finalContent ?? 'Desculpe, não consegui concluir. Tente novamente.';
+  let content = finalContent ?? 'Desculpe, não consegui concluir. Tente novamente.';
+  // Prepend any interim text the model wrote alongside tool calls (deduping the final).
+  const pre = preTexts.filter(t => t && t.trim() && t.trim() !== content.trim());
+  if (pre.length) content = [...pre, content].join('\n\n');
   const escalate = content.includes(ESCALATION_FLAG);
 
-  return { content, toolCallsMade, escalate };
+  return { content, toolCallsMade, escalate, labels: appliedLabels.size ? [...appliedLabels] : undefined };
 }

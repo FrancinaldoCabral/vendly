@@ -80,8 +80,10 @@ export interface AgentDoc {
   tools: string[];
   builtinTools: string[];
   assets?: {
-    polls?: Array<{ label: string; question: string; options: string[]; multiple?: boolean }>;
-    reactions?: string[];
+    menus?: Array<{ label: string; intro?: string; options: string[] }>;
+    reactions?: Array<{ label: string; emoji: string }>;
+    stickers?: Array<{ label: string; url: string }>;
+    labels?: Array<{ label: string }>;
     files?: Array<{ label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }>;
     locations?: Array<{ label: string; name: string; address: string; latitude: number; longitude: number }>;
     contacts?: Array<{ label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }>;

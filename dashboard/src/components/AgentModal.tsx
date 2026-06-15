@@ -14,13 +14,23 @@ const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
 const EMPTY_FILTER: ContactFilter = { mode: 'blacklist', contacts: [], groups: [] };
-type AssetKind = 'polls' | 'reactions' | 'files' | 'locations' | 'contacts';
+type AssetKind = 'menus' | 'reactions' | 'stickers' | 'labels' | 'files' | 'locations' | 'contacts';
+
+/** All configured item labels across every asset kind — used to highlight them in the prompt. */
+function allAssetLabels(a: AgentAssets): string[] {
+  const kinds: AssetKind[] = ['menus', 'reactions', 'stickers', 'labels', 'files', 'locations', 'contacts'];
+  const out: string[] = [];
+  for (const k of kinds) for (const it of (a[k] ?? []) as Array<{ label?: string }>) if (it.label) out.push(it.label);
+  return Array.from(new Set(out));
+}
 
 /** Coerce numbers and drop incomplete entries. */
 function normalizeAssets(a: AgentAssets): AgentAssets {
   return {
-    polls: (a.polls ?? []).filter(p => p.label && p.question && (p.options ?? []).length >= 2),
-    reactions: Array.from(new Set((a.reactions ?? []).map(e => e.trim()).filter(Boolean))),
+    menus: (a.menus ?? []).filter(m => m.label && (m.options ?? []).length >= 2),
+    reactions: (a.reactions ?? []).filter(r => r.label && r.emoji),
+    stickers: (a.stickers ?? []).filter(s => s.label && s.url),
+    labels: (a.labels ?? []).filter(l => l.label),
     files: (a.files ?? []).filter(f => f.label && f.url),
     locations: (a.locations ?? []).filter(l => l.label).map(l => ({
       ...l, latitude: Number(l.latitude) || 0, longitude: Number(l.longitude) || 0,
@@ -177,42 +187,83 @@ function FileUpload({ onUploaded }: { onUploaded: (url: string, name?: string, m
 function AssetEditor({ kind, assets, onChange }: { kind: AssetKind; assets: AgentAssets; onChange: (a: AgentAssets) => void }) {
   const wrap = { marginTop: 10, paddingTop: 10, borderTop: '1px dashed #d9d9d9' } as const;
 
-  // Reactions: just a list of allowed emojis.
-  if (kind === 'reactions') {
-    const emojis = assets.reactions ?? [];
+  // Menus: label + intro + options (rendered as a numbered text list to the client).
+  if (kind === 'menus') {
+    const menus = assets.menus ?? [];
+    const upd = (items: typeof menus) => onChange({ ...assets, menus: items });
+    const set = (i: number, f: string, v: unknown) => upd(menus.map((m, idx) => idx === i ? { ...m, [f]: v } : m));
     return (
       <div style={wrap}>
-        <Text type="secondary" style={{ fontSize: 12 }}>Emojis que o agente pode usar (digite e tecle Enter):</Text>
-        <Select mode="tags" style={{ width: '100%', marginTop: 6 }} value={emojis}
-          onChange={(v: string[]) => onChange({ ...assets, reactions: v })}
-          placeholder="👍 ❤️ 🎉 ✅" tokenSeparators={[' ', ',']} open={false} />
+        {menus.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Cadastre ao menos um menu para esta ação funcionar.</Text>}
+        {menus.map((m, i) => (
+          <div key={i} style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 8, marginBottom: 8 }}>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+              <Input size="small" placeholder="Rótulo p/ citar no prompt (ex.: Horários)" value={m.label} onChange={e => set(i, 'label', e.target.value)} />
+              <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => upd(menus.filter((_, idx) => idx !== i))} />
+            </div>
+            <Input size="small" placeholder="Texto de introdução (ex.: Para qual horário prefere?)" value={m.intro ?? ''} onChange={e => set(i, 'intro', e.target.value)} style={{ marginBottom: 6 }} />
+            <Select mode="tags" size="small" style={{ width: '100%' }} value={m.options ?? []} onChange={(v: string[]) => set(i, 'options', v)}
+              placeholder="Opções (digite cada uma e tecle Enter)" tokenSeparators={[',']} open={false} />
+            <Text type="secondary" style={{ fontSize: 11 }}>O cliente recebe as opções numeradas e responde livremente; o agente entende a escolha.</Text>
+          </div>
+        ))}
+        <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => upd([...menus, { label: '', intro: '', options: [] }])}>Adicionar menu</Button>
       </div>
     );
   }
 
-  // Polls: label + question + options + multiple.
-  if (kind === 'polls') {
-    const polls = assets.polls ?? [];
-    const upd = (items: typeof polls) => onChange({ ...assets, polls: items });
-    const set = (i: number, f: string, v: unknown) => upd(polls.map((p, idx) => idx === i ? { ...p, [f]: v } : p));
+  // Reactions: label + emoji (so you can cite the label in the prompt).
+  if (kind === 'reactions') {
+    const reactions = assets.reactions ?? [];
+    const upd = (items: typeof reactions) => onChange({ ...assets, reactions: items });
+    const set = (i: number, f: string, v: string) => upd(reactions.map((r, idx) => idx === i ? { ...r, [f]: v } : r));
     return (
       <div style={wrap}>
-        {polls.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Cadastre ao menos uma enquete para esta ação funcionar.</Text>}
-        {polls.map((p, i) => (
-          <div key={i} style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 8, marginBottom: 8 }}>
-            <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-              <Input size="small" placeholder="Rótulo (ex.: Horários)" value={p.label} onChange={e => set(i, 'label', e.target.value)} />
-              <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => upd(polls.filter((_, idx) => idx !== i))} />
-            </div>
-            <Input size="small" placeholder="Pergunta da enquete" value={p.question} onChange={e => set(i, 'question', e.target.value)} style={{ marginBottom: 6 }} />
-            <Select mode="tags" size="small" style={{ width: '100%' }} value={p.options ?? []} onChange={(v: string[]) => set(i, 'options', v)}
-              placeholder="Opções (digite cada uma e tecle Enter)" tokenSeparators={[',']} open={false} />
-            <div style={{ marginTop: 6 }}>
-              <Switch size="small" checked={!!p.multiple} onChange={c => set(i, 'multiple', c)} /> <Text style={{ fontSize: 12 }}>permitir múltipla escolha</Text>
-            </div>
+        {reactions.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Cadastre ao menos uma reação (rótulo + emoji) para esta ação funcionar.</Text>}
+        {reactions.map((r, i) => (
+          <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}>
+            <Input size="small" style={{ flex: 1 }} placeholder="Rótulo (ex.: Agradecimento)" value={r.label} onChange={e => set(i, 'label', e.target.value)} />
+            <Input size="small" style={{ width: 70, textAlign: 'center' }} placeholder="👍" value={r.emoji} onChange={e => set(i, 'emoji', e.target.value)} />
+            <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => upd(reactions.filter((_, idx) => idx !== i))} />
           </div>
         ))}
-        <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => upd([...polls, { label: '', question: '', options: [], multiple: false }])}>Adicionar enquete</Button>
+        <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => upd([...reactions, { label: '', emoji: '' }])}>Adicionar reação</Button>
+      </div>
+    );
+  }
+
+  // Stickers: label + .webp file (upload to storage).
+  if (kind === 'stickers') {
+    const stickers = assets.stickers ?? [];
+    const upd = (items: typeof stickers) => onChange({ ...assets, stickers: items });
+    const set = (i: number, f: string, v: string) => upd(stickers.map((s, idx) => idx === i ? { ...s, [f]: v } : s));
+    return (
+      <div style={wrap}>
+        {stickers.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Cadastre ao menos uma figurinha para esta ação funcionar.</Text>}
+        {stickers.map((s, i) => (
+          <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Input size="small" style={{ flex: 1 }} placeholder="Rótulo (ex.: Comemoração)" value={s.label} onChange={e => set(i, 'label', e.target.value)} />
+            <FileUpload onUploaded={(url) => set(i, 'url', url)} />
+            <Input size="small" style={{ flex: 2 }} placeholder="URL do .webp (ou faça upload)" value={s.url} onChange={e => set(i, 'url', e.target.value)} />
+            <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => upd(stickers.filter((_, idx) => idx !== i))} />
+          </div>
+        ))}
+        <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => upd([...stickers, { label: '', url: '' }])}>Adicionar figurinha</Button>
+        <div><Text type="secondary" style={{ fontSize: 11 }}>Use arquivos no formato <b>.webp</b> (figurinha do WhatsApp).</Text></div>
+      </div>
+    );
+  }
+
+  // CRM labels: just a label name each (applied to the conversation in the painel).
+  if (kind === 'labels') {
+    const labels = assets.labels ?? [];
+    const upd = (items: typeof labels) => onChange({ ...assets, labels: items });
+    return (
+      <div style={wrap}>
+        <Text type="secondary" style={{ fontSize: 12 }}>Etiquetas que o agente pode aplicar à conversa (digite e tecle Enter):</Text>
+        <Select mode="tags" style={{ width: '100%', marginTop: 6 }} value={labels.map(l => l.label)}
+          onChange={(v: string[]) => upd(Array.from(new Set(v.map(s => s.trim()).filter(Boolean))).map(label => ({ label })))}
+          placeholder="Lead quente, Comprou, Reclamação" tokenSeparators={[',']} open={false} />
       </div>
     );
   }
@@ -410,10 +461,11 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
     else create.mutate(vals as Record<string, unknown>);
   });
 
-  const toolNames = [
+  const toolNames = Array.from(new Set([
     ...customApis.map(a => a.name),
     ...catalog.filter(c => builtinTools.includes(c.id)).map(c => c.label),
-  ];
+    ...allAssetLabels(assets), // menu/reação/figurinha/etiqueta/arquivo… labels you cite in the prompt
+  ].filter(Boolean)));
 
   return (
     <Modal

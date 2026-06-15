@@ -72,8 +72,10 @@ interface AgentDoc {
   tools?: string[];
   builtinTools?: string[];
   assets?: {
-    polls?: Array<{ label: string; question: string; options: string[]; multiple?: boolean }>;
-    reactions?: string[];
+    menus?: Array<{ label: string; intro?: string; options: string[] }>;
+    reactions?: Array<{ label: string; emoji: string }>;
+    stickers?: Array<{ label: string; url: string }>;
+    labels?: Array<{ label: string }>;
     files?: Array<{ label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }>;
     locations?: Array<{ label: string; name: string; address: string; latitude: number; longitude: number }>;
     contacts?: Array<{ label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }>;
@@ -308,7 +310,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     },
   };
 
-  let result: { content: string; toolCallsMade: boolean; escalate: boolean };
+  let result: { content: string; toolCallsMade: boolean; escalate: boolean; labels?: string[] };
   try {
     result = await agentLoop(loopCtx);
   } catch (e) {
@@ -316,7 +318,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     return;
   }
 
-  const { content, escalate } = result;
+  const { content, escalate, labels } = result;
 
   // Skip signals
   if (content === '[SKIP]' || !content.trim()) {
@@ -347,13 +349,14 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   // Sync to Chatwoot
   const cleanOutgoing = content.replace(/\[ESCALAR_HUMANO\]/g, '').trim();
 
+  let resolvedConvId: number | null = chatwootConvId ?? null;
   if (chatwootConvId) {
     // Chatwoot path: we know the conversation ID — use it directly
     await syncChatwootOutgoing(chatwootConvId, content, cwAccountId, cwApiKey);
   } else if (agentDoc.chatwootInboxId && cwAccountId && cwApiKey) {
     // Evolution path: no Chatwoot conv ID known — find/create contact+conversation and sync
     await sleep(1500); // brief wait so Evolution's own integration can create the conversation first
-    await syncEvolutionToChaTwoot(
+    resolvedConvId = await syncEvolutionToChaTwoot(
       contactJid,
       senderPhone,
       senderName,
@@ -363,6 +366,11 @@ export async function processBuffer(agentId: string, conversationId: string, ten
       cwAccountId,
       cwApiKey,
     );
+  }
+
+  // Apply CRM labels the agent chose (merged with existing) to the resolved conversation.
+  if (labels?.length && resolvedConvId && cwAccountId && cwApiKey) {
+    await applyChatwootLabels(resolvedConvId, labels, cwAccountId, cwApiKey);
   }
 
   // Escalation: assign to human team/agent
@@ -709,8 +717,8 @@ async function syncEvolutionToChaTwoot(
   inboxId: number,
   accountId: string,
   apiKey: string,
-): Promise<void> {
-  if (!accountId || !apiKey || !inboxId) return;
+): Promise<number | null> {
+  if (!accountId || !apiKey || !inboxId) return null;
 
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
   const headers: Record<string, string> = {
@@ -759,7 +767,7 @@ async function syncEvolutionToChaTwoot(
 
     if (!contactId) {
       console.warn('[debounce] Chatwoot sync: could not find/create contact');
-      return;
+      return null;
     }
 
     // 2. Find open conversation for this contact in our inbox
@@ -793,7 +801,7 @@ async function syncEvolutionToChaTwoot(
 
     if (!convId) {
       console.warn('[debounce] Chatwoot sync: could not find/create conversation');
-      return;
+      return null;
     }
 
     // 3. Add incoming message only when we created the conversation
@@ -816,8 +824,39 @@ async function syncEvolutionToChaTwoot(
     }
 
     console.log(`[debounce] Chatwoot synced: contact=${contactId} conv=${convId} newConv=${isNewConv}`);
+    return convId;
   } catch (e) {
     console.error('[debounce] Chatwoot explicit sync failed:', String(e));
+    return null;
+  }
+}
+
+/**
+ * Apply CRM labels to a Chatwoot conversation, MERGING with existing labels
+ * (the labels endpoint replaces the full set, so we fetch + union first).
+ */
+async function applyChatwootLabels(
+  conversationId: number,
+  labels: string[],
+  accountId: string,
+  apiKey: string,
+): Promise<void> {
+  if (!accountId || !apiKey || !conversationId || labels.length === 0) return;
+  const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+  const url = `${cwUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/labels`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'api_access_token': apiKey };
+  try {
+    let existing: string[] = [];
+    const gr = await fetch(url, { headers });
+    if (gr.ok) {
+      const d = await gr.json() as { payload?: string[] };
+      existing = Array.isArray(d.payload) ? d.payload : [];
+    }
+    const merged = Array.from(new Set([...existing, ...labels]));
+    await fetch(url, { method: 'POST', headers, body: JSON.stringify({ labels: merged }) });
+    console.log(`[debounce] Chatwoot labels applied conv=${conversationId} labels=[${merged.join(',')}]`);
+  } catch (e) {
+    console.error('[debounce] Chatwoot label apply failed:', String(e));
   }
 }
 
