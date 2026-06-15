@@ -7,6 +7,7 @@ import { tenantsRouter } from './routes/tenants.js';
 import { agentsRouter } from './routes/agents.js';
 import { connectionsRouter } from './routes/connections.js';
 import { TOOL_CATALOG } from '../services/tool-catalog.js';
+import { uploadFile } from '../services/storage.js';
 import { knowledgeRouter } from './routes/knowledge.js';
 import { scheduledPostsRouter } from './routes/scheduled_posts.js';
 import { conversationsRouter } from './routes/conversations.js';
@@ -381,6 +382,19 @@ apiRouter.use(requireAuth);
 // Friendly built-in tool catalog (for the agent config UI — no technical jargon)
 apiRouter.get('/tool-catalog', (_req, res) => {
   res.json(TOOL_CATALOG);
+});
+
+// Upload a file to object storage (MinIO). Body: { filename, contentType, dataBase64 }.
+apiRouter.post('/uploads', async (req, res) => {
+  try {
+    const tenantId = req.auth!.tenantId;
+    const { filename, contentType, dataBase64 } = req.body as { filename?: string; contentType?: string; dataBase64?: string };
+    if (!dataBase64) { res.status(400).json({ error: 'arquivo ausente' }); return; }
+    const data = Buffer.from(dataBase64, 'base64');
+    if (data.length > 25 * 1024 * 1024) { res.status(413).json({ error: 'arquivo muito grande (máx. 25 MB)' }); return; }
+    const url = await uploadFile(tenantId === '__admin__' ? 'admin' : tenantId, filename ?? 'arquivo', contentType ?? '', data);
+    res.json({ url });
+  } catch (e) { res.status(500).json({ error: String(e instanceof Error ? e.message : e) }); }
 });
 
 apiRouter.use('/tenants', tenantsRouter);

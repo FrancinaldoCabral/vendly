@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import {
-  Modal, Form, Input, Switch, Select, Popconfirm, Tag, message, Alert, Tabs, Typography, Button,
+  Modal, Form, Input, Switch, Select, Popconfirm, Tag, message, Alert, Tabs, Typography, Button, Upload,
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, RobotOutlined, ApiOutlined,
-  TeamOutlined, FilterOutlined, ThunderboltOutlined, WhatsAppOutlined,
+  TeamOutlined, FilterOutlined, ThunderboltOutlined, WhatsAppOutlined, UploadOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
@@ -14,11 +14,13 @@ const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
 const EMPTY_FILTER: ContactFilter = { mode: 'blacklist', contacts: [], groups: [] };
-type AssetKind = 'files' | 'locations' | 'contacts';
+type AssetKind = 'polls' | 'reactions' | 'files' | 'locations' | 'contacts';
 
-/** Coerce location lat/long to numbers and drop entries without a label. */
+/** Coerce numbers and drop incomplete entries. */
 function normalizeAssets(a: AgentAssets): AgentAssets {
   return {
+    polls: (a.polls ?? []).filter(p => p.label && p.question && (p.options ?? []).length >= 2),
+    reactions: Array.from(new Set((a.reactions ?? []).map(e => e.trim()).filter(Boolean))),
     files: (a.files ?? []).filter(f => f.label && f.url),
     locations: (a.locations ?? []).filter(l => l.label).map(l => ({
       ...l, latitude: Number(l.latitude) || 0, longitude: Number(l.longitude) || 0,
@@ -149,32 +151,95 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
 
 // ── Built-in actions (friendly switches with examples) ───────────────────────
 
-// Inline editor for an action's content (files / locations / contacts).
+// Upload a file to storage (MinIO) and return its public URL.
+function FileUpload({ onUploaded }: { onUploaded: (url: string, name?: string, mimetype?: string) => void }) {
+  const [loading, setLoading] = useState(false);
+  return (
+    <Upload
+      showUploadList={false}
+      beforeUpload={async (file) => {
+        setLoading(true);
+        try {
+          const { url } = await api.uploadFile(file as File);
+          onUploaded(url, (file as File).name, (file as File).type);
+          message.success('Arquivo enviado!');
+        } catch (e) { message.error((e as Error).message); }
+        setLoading(false);
+        return false; // we upload manually
+      }}
+    >
+      <Button size="small" icon={<UploadOutlined />} loading={loading}>Upload</Button>
+    </Upload>
+  );
+}
+
+// Inline editor for an action's pre-configured content.
 function AssetEditor({ kind, assets, onChange }: { kind: AssetKind; assets: AgentAssets; onChange: (a: AgentAssets) => void }) {
+  const wrap = { marginTop: 10, paddingTop: 10, borderTop: '1px dashed #d9d9d9' } as const;
+
+  // Reactions: just a list of allowed emojis.
+  if (kind === 'reactions') {
+    const emojis = assets.reactions ?? [];
+    return (
+      <div style={wrap}>
+        <Text type="secondary" style={{ fontSize: 12 }}>Emojis que o agente pode usar (digite e tecle Enter):</Text>
+        <Select mode="tags" style={{ width: '100%', marginTop: 6 }} value={emojis}
+          onChange={(v: string[]) => onChange({ ...assets, reactions: v })}
+          placeholder="👍 ❤️ 🎉 ✅" tokenSeparators={[' ', ',']} open={false} />
+      </div>
+    );
+  }
+
+  // Polls: label + question + options + multiple.
+  if (kind === 'polls') {
+    const polls = assets.polls ?? [];
+    const upd = (items: typeof polls) => onChange({ ...assets, polls: items });
+    const set = (i: number, f: string, v: unknown) => upd(polls.map((p, idx) => idx === i ? { ...p, [f]: v } : p));
+    return (
+      <div style={wrap}>
+        {polls.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Cadastre ao menos uma enquete para esta ação funcionar.</Text>}
+        {polls.map((p, i) => (
+          <div key={i} style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 8, marginBottom: 8 }}>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+              <Input size="small" placeholder="Rótulo (ex.: Horários)" value={p.label} onChange={e => set(i, 'label', e.target.value)} />
+              <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => upd(polls.filter((_, idx) => idx !== i))} />
+            </div>
+            <Input size="small" placeholder="Pergunta da enquete" value={p.question} onChange={e => set(i, 'question', e.target.value)} style={{ marginBottom: 6 }} />
+            <Select mode="tags" size="small" style={{ width: '100%' }} value={p.options ?? []} onChange={(v: string[]) => set(i, 'options', v)}
+              placeholder="Opções (digite cada uma e tecle Enter)" tokenSeparators={[',']} open={false} />
+            <div style={{ marginTop: 6 }}>
+              <Switch size="small" checked={!!p.multiple} onChange={c => set(i, 'multiple', c)} /> <Text style={{ fontSize: 12 }}>permitir múltipla escolha</Text>
+            </div>
+          </div>
+        ))}
+        <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => upd([...polls, { label: '', question: '', options: [], multiple: false }])}>Adicionar enquete</Button>
+      </div>
+    );
+  }
+
+  // files / locations / contacts: generic field rows.
   const list = (assets[kind] ?? []) as Record<string, unknown>[];
   const update = (items: Record<string, unknown>[]) => onChange({ ...assets, [kind]: items });
-  const setField = (i: number, field: string, val: string) => {
-    const next = list.map((it, idx) => idx === i ? { ...it, [field]: val } : it);
-    update(next);
-  };
+  const setField = (i: number, field: string, val: string) => update(list.map((it, idx) => idx === i ? { ...it, [field]: val } : it));
+  const setFields = (i: number, patch: Record<string, unknown>) => update(list.map((it, idx) => idx === i ? { ...it, ...patch } : it));
   const add = () => update([...list, kind === 'files' ? { label: '', url: '', mediatype: 'document' }
     : kind === 'locations' ? { label: '', name: '', address: '', latitude: 0, longitude: 0 }
     : { label: '', fullName: '', phone: '' }]);
   const remove = (i: number) => update(list.filter((_, idx) => idx !== i));
-
   const inp = (i: number, field: string, placeholder: string, flex = 1) => (
     <Input size="small" style={{ flex }} placeholder={placeholder}
       value={String(list[i][field] ?? '')} onChange={e => setField(i, field, e.target.value)} />
   );
 
   return (
-    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px dashed #d9d9d9' }}>
+    <div style={wrap}>
       {list.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Cadastre ao menos um item para esta ação funcionar.</Text>}
       {list.map((_, i) => (
         <div key={i} style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6, alignItems: 'center' }}>
           {inp(i, 'label', 'Rótulo (ex.: Cardápio)', 1)}
           {kind === 'files' && <>
-            {inp(i, 'url', 'URL do arquivo (https://…)', 2)}
+            <FileUpload onUploaded={(url, name, mt) => setFields(i, { url, fileName: name, mimetype: mt })} />
+            {inp(i, 'url', 'URL do arquivo (ou faça upload)', 2)}
             <Select size="small" style={{ width: 110 }} value={String(list[i].mediatype ?? 'document')}
               onChange={v => setField(i, 'mediatype', v)}
               options={[{ value: 'document', label: 'Documento' }, { value: 'image', label: 'Imagem' }, { value: 'video', label: 'Vídeo' }]} />

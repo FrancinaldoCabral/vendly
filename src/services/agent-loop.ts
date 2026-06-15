@@ -49,9 +49,19 @@ export interface CustomApi {
 
 /** Per-agent content the actions draw from (never invented by the LLM). */
 export interface AgentAssets {
+  polls?: { label: string; question: string; options: string[]; multiple?: boolean }[];
+  reactions?: string[]; // allowed emojis
   files?: { label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }[];
   locations?: { label: string; name: string; address: string; latitude: number; longitude: number }[];
   contacts?: { label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }[];
+}
+
+/** Allowed values for an action's selector (item labels, or the emojis themselves). */
+function assetValues(kind: string, assets: AgentAssets | undefined): string[] {
+  if (!assets) return [];
+  if (kind === 'reactions') return (assets.reactions ?? []).filter(Boolean);
+  const list = (assets as Record<string, Array<{ label?: string }>>)[kind] ?? [];
+  return list.map(i => i.label ?? '').filter(Boolean);
 }
 
 export interface AgentConfig {
@@ -125,30 +135,24 @@ const BUSCAR_MEMORIA_TOOL = {
   },
 };
 
-/** Clone an action's param schema and fill the asset-select property's enum with available labels. */
-function withAssetEnum(params: Record<string, unknown>, labels: string[]): Record<string, unknown> {
+/** Clone an action's schema and fill ONLY the selector property's enum with allowed values. */
+function withAssetEnum(params: Record<string, unknown>, prop: string, values: string[]): Record<string, unknown> {
   const clone = JSON.parse(JSON.stringify(params)) as { properties?: Record<string, Record<string, unknown>> };
-  const props = clone.properties ?? {};
-  for (const key of Object.keys(props)) {
-    props[key] = { ...props[key], enum: labels };
-  }
+  if (clone.properties?.[prop]) clone.properties[prop] = { ...clone.properties[prop], enum: values };
   return clone as Record<string, unknown>;
 }
 
 function buildToolList(agent: AgentConfig) {
   const tools: Array<{ type: 'function'; function: { name: string; description: string; parameters: unknown } }> = [BUSCAR_MEMORIA_TOOL];
 
-  // Curated actions — sensitive fields (instance, destination number, message id) are
-  // NEVER exposed; they are injected at execution from the conversation context.
+  // Curated actions — the agent only chooses a PRE-CONFIGURED item; sensitive fields
+  // (instance, destination number, message id) are injected at execution from context.
   for (const id of agent.builtinTools ?? []) {
     const cat = CATALOG_BY_ID.get(id);
     if (!cat) continue;
-    let params = cat.params;
-    if (cat.asset) {
-      const labels = (agent.assets?.[cat.asset] ?? []).map(a => a.label).filter(Boolean);
-      if (labels.length === 0) continue; // enabled but nothing configured → don't offer it
-      params = withAssetEnum(cat.params, labels);
-    }
+    const values = assetValues(cat.asset, agent.assets);
+    if (values.length === 0) continue; // enabled but nothing configured → don't offer it
+    const params = withAssetEnum(cat.params, cat.assetParam, values);
     tools.push({ type: 'function', function: { name: cat.id, description: `${cat.description} ${cat.example}`, parameters: params } });
   }
 
@@ -179,16 +183,19 @@ function buildCatalogCall(
 
   switch (id) {
     case 'acao_enviar_enquete': {
-      const opcoes = Array.isArray(args.opcoes) ? (args.opcoes as unknown[]).map(String) : [];
-      if (!args.pergunta || opcoes.length < 2) return { error: 'enquete precisa de pergunta e 2+ opções' };
+      const poll = (assets?.polls ?? []).find(p => p.label === args.enquete);
+      if (!poll) return { error: `enquete "${String(args.enquete)}" não cadastrada` };
+      const opcoes = (poll.options ?? []).map(String).filter(Boolean);
+      if (opcoes.length < 2) return { error: `enquete "${poll.label}" precisa de 2+ opções` };
       return { name: 'evolution_send_poll', payload: {
-        instanceName, number, name: String(args.pergunta),
-        selectableCount: args.multipla ? Math.max(1, opcoes.length) : 1, values: opcoes,
+        instanceName, number, name: poll.question,
+        selectableCount: poll.multiple ? Math.max(1, opcoes.length) : 1, values: opcoes,
       } };
     }
     case 'acao_reagir': {
-      // Default: react to the last message. If the agent passed a snippet ("referencia"),
-      // find the most recent message containing that text and react to THAT one instead.
+      const emoji = String(args.emoji ?? '');
+      if (!(assets?.reactions ?? []).includes(emoji)) return { error: `emoji "${emoji}" não permitido` };
+      // Default: react to the last message. If the agent passed a snippet, react to that one.
       let messageId = ctx.lastMessageId;
       const ref = args.referencia ? String(args.referencia).toLowerCase().trim() : '';
       if (ref) {
@@ -197,7 +204,7 @@ function buildCatalogCall(
       }
       if (!messageId) return { error: 'não há mensagem para reagir' };
       return { name: 'evolution_send_reaction', payload: {
-        instanceName, remoteJid: number, fromMe: false, messageId, reaction: String(args.emoji ?? ''),
+        instanceName, remoteJid: number, fromMe: false, messageId, reaction: emoji,
       } };
     }
     case 'acao_enviar_arquivo': {

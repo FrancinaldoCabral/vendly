@@ -1,5 +1,23 @@
 import 'dotenv/config';
 
+// MinIO / S3-compatible storage — accept either explicit fields or a full server URL.
+const minioServerUrl = process.env.MINIO_SERVER_URL ?? '';
+let minioHost = process.env.MINIO_ENDPOINT ?? process.env.MINIO_SERVER_HOST ?? '';
+let minioSSL = (process.env.MINIO_USE_SSL ?? 'true') !== 'false';
+let minioPort = parseInt(process.env.MINIO_PORT ?? '', 10);
+if (minioServerUrl) {
+  try {
+    const u = new URL(minioServerUrl);
+    if (!minioHost) minioHost = u.hostname;
+    minioSSL = u.protocol === 'https:';
+    if (!minioPort) minioPort = u.port ? parseInt(u.port, 10) : (minioSSL ? 443 : 80);
+  } catch { /* ignore malformed URL */ }
+}
+if (!minioPort) minioPort = minioSSL ? 443 : 80;
+const minioBucket = process.env.MINIO_BUCKET ?? 'vendly';
+const minioPublicUrl = process.env.MINIO_PUBLIC_URL
+  ?? (minioServerUrl ? `${minioServerUrl.replace(/\/$/, '')}/${minioBucket}` : '');
+
 const redisUrl =
   process.env.REDIS_URL ??
   (process.env.REDIS_HOST
@@ -53,6 +71,18 @@ export const config = {
   },
   admin: {
     apiKey: process.env.ADMIN_API_KEY ?? 'vendly-admin-dev',
+  },
+  // Object storage for uploaded files (MinIO / S3-compatible). Installed manually by the
+  // operator; when MINIO_* is unset, uploads return a friendly "not configured" error and
+  // the client can still paste a public URL.
+  minio: {
+    endpoint: minioHost,        // host only (derived from MINIO_SERVER_URL/HOST/ENDPOINT)
+    port: minioPort,
+    useSSL: minioSSL,
+    accessKey: process.env.MINIO_ACCESS_KEY ?? '',
+    secretKey: process.env.MINIO_SECRET_KEY ?? '',
+    bucket: minioBucket,
+    publicBaseUrl: minioPublicUrl, // e.g. https://bucket-s3-api.redatudo.online/vendly
   },
   jwt: {
     secret: process.env.JWT_SECRET ?? 'change-me-in-production',

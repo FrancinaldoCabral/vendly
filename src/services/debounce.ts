@@ -72,6 +72,8 @@ interface AgentDoc {
   tools?: string[];
   builtinTools?: string[];
   assets?: {
+    polls?: Array<{ label: string; question: string; options: string[]; multiple?: boolean }>;
+    reactions?: string[];
     files?: Array<{ label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }>;
     locations?: Array<{ label: string; name: string; address: string; latitude: number; longitude: number }>;
     contacts?: Array<{ label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }>;

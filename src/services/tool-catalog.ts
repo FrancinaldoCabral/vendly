@@ -1,65 +1,66 @@
 /**
- * tool-catalog.ts — Curated, brand-free catalog of actions an agent can perform
- * during a conversation. Written for business owners (no Evolution/Chatwoot/API
- * jargon). Each action exposes to the LLM ONLY the content it must decide; the
- * platform injects the rest (which WhatsApp, the contact's number, message id…)
- * in agent-loop. Actions that need content the agent can't invent (a file, an
- * address, a contact card) draw from per-agent "assets" the client configures.
+ * tool-catalog.ts — Curated actions an agent can perform during a conversation.
+ *
+ * Principle: the LLM NEVER invents content. Every action's content is pre-configured
+ * by the client (polls, allowed emojis, files, locations, contacts). The agent only
+ * DECIDES WHEN to fire and WHICH configured item to use (by its label). The platform
+ * injects all sensitive fields (which WhatsApp, the contact's number, message id).
  */
 
-export type AssetKind = 'files' | 'locations' | 'contacts';
+export type AssetKind = 'polls' | 'reactions' | 'files' | 'locations' | 'contacts';
 
 export interface CatalogTool {
   id: string;            // tool name exposed to the LLM
   label: string;         // friendly name in the UI
-  description: string;   // what it does
-  example: string;       // 💡 when the agent would use it
-  category: string;      // UI grouping
-  /** If set, this action picks from the agent's configured assets of this kind. */
-  asset?: AssetKind;
-  /** JSON-schema of what the LLM provides. Dynamic enums (asset labels) are filled at runtime. */
+  description: string;
+  example: string;
+  category: string;
+  asset: AssetKind;      // every action draws from configured content
+  /** The single LLM param whose enum is filled with the configured item labels (or emojis). */
+  assetParam: string;
   params: Record<string, unknown>;
 }
 
 export const TOOL_CATALOG: CatalogTool[] = [
   {
     id: 'acao_enviar_enquete',
-    label: 'Criar uma enquete',
-    description: 'O agente cria uma enquete (votação) para o cliente escolher uma opção. O agente monta a pergunta e as opções conforme a conversa.',
-    example: 'Para agendar, o agente manda uma enquete com os horários disponíveis.',
-    category: 'Durante a conversa',
+    label: 'Enviar uma enquete',
+    description: 'O agente envia uma das enquetes que você cadastrou (pergunta + opções prontas).',
+    example: 'O cliente quer agendar → o agente envia a enquete "Horários".',
+    category: 'Ações',
+    asset: 'polls',
+    assetParam: 'enquete',
     params: {
       type: 'object',
-      required: ['pergunta', 'opcoes'],
-      properties: {
-        pergunta: { type: 'string', description: 'A pergunta da enquete' },
-        opcoes: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 12, description: 'As opções de resposta' },
-        multipla: { type: 'boolean', description: 'Permitir escolher mais de uma opção (padrão: não)' },
-      },
+      required: ['enquete'],
+      properties: { enquete: { type: 'string', description: 'Qual enquete enviar (use exatamente um dos rótulos disponíveis)' } },
     },
   },
   {
     id: 'acao_reagir',
     label: 'Reagir com emoji',
-    description: 'O agente reage com um emoji a uma mensagem da conversa (por padrão, a última). Pode reagir a uma mensagem anterior informando um trecho dela.',
-    example: 'O cliente confirma o endereço → o agente reage com 👍. Ou dá um 👍 numa mensagem específica que ele citar.',
-    category: 'Durante a conversa',
+    description: 'O agente reage a uma mensagem da conversa usando um dos emojis que você permitiu.',
+    example: 'O cliente confirma o pedido → o agente reage com 👍.',
+    category: 'Ações',
+    asset: 'reactions',
+    assetParam: 'emoji',
     params: {
       type: 'object',
       required: ['emoji'],
       properties: {
-        emoji: { type: 'string', description: 'Um único emoji, ex.: 👍 ❤️ 🎉' },
-        referencia: { type: 'string', description: 'Opcional: um trecho do texto da mensagem a reagir, se não for a última.' },
+        emoji: { type: 'string', description: 'Qual emoji usar (use exatamente um dos permitidos)' },
+        referencia: { type: 'string', description: 'Opcional: um trecho da mensagem a reagir, se não for a última.' },
       },
     },
   },
   {
     id: 'acao_enviar_arquivo',
-    label: 'Enviar um arquivo (imagem, vídeo ou documento)',
-    description: 'O agente envia um dos arquivos que você cadastrou (ex.: cardápio, catálogo, tabela de preços).',
-    example: 'O cliente pede o cardápio → o agente envia o PDF do cardápio.',
-    category: 'Conteúdo cadastrado',
+    label: 'Enviar um arquivo',
+    description: 'O agente envia um dos arquivos que você cadastrou (imagem, vídeo ou documento).',
+    example: 'O cliente pede o cardápio → o agente envia o PDF "Cardápio".',
+    category: 'Conteúdo',
     asset: 'files',
+    assetParam: 'arquivo',
     params: {
       type: 'object',
       required: ['arquivo'],
@@ -68,11 +69,12 @@ export const TOOL_CATALOG: CatalogTool[] = [
   },
   {
     id: 'acao_enviar_localizacao',
-    label: 'Enviar uma localização no mapa',
+    label: 'Enviar uma localização',
     description: 'O agente envia um dos endereços que você cadastrou, como ponto no mapa.',
-    example: 'O cliente pergunta onde fica a loja → o agente envia a localização.',
-    category: 'Conteúdo cadastrado',
+    example: 'O cliente pergunta onde fica a loja → o agente envia "Loja Centro".',
+    category: 'Conteúdo',
     asset: 'locations',
+    assetParam: 'local',
     params: {
       type: 'object',
       required: ['local'],
@@ -82,10 +84,11 @@ export const TOOL_CATALOG: CatalogTool[] = [
   {
     id: 'acao_enviar_contato',
     label: 'Compartilhar um contato',
-    description: 'O agente compartilha um dos contatos que você cadastrou (ex.: financeiro, suporte, um vendedor).',
-    example: 'O cliente quer falar com o financeiro → o agente envia o contato dele.',
-    category: 'Conteúdo cadastrado',
+    description: 'O agente compartilha um dos contatos que você cadastrou.',
+    example: 'O cliente quer falar com o financeiro → o agente envia o contato "Financeiro".',
+    category: 'Conteúdo',
     asset: 'contacts',
+    assetParam: 'contato',
     params: {
       type: 'object',
       required: ['contato'],

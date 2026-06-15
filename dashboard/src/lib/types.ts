@@ -36,6 +36,8 @@ export interface ContactFilter {
 }
 
 export interface AgentAssets {
+  polls?: { label: string; question: string; options: string[]; multiple?: boolean }[];
+  reactions?: string[];
   files?: { label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }[];
   locations?: { label: string; name: string; address: string; latitude: number; longitude: number }[];
   contacts?: { label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }[];

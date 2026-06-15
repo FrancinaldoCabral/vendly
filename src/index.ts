@@ -145,7 +145,7 @@ async function main() {
   const publicDir = path.resolve(__dirname, '..', 'public');
 
   const webApp = express();
-  webApp.use(express.json({ limit: '4mb' }));
+  webApp.use(express.json({ limit: '30mb' })); // large enough for base64 file uploads
 
   // ── WooCommerce subscription webhook ──────────────────────────────────────
   webApp.post('/webhooks/woocommerce', async (req, res) => {

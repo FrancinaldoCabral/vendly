@@ -44,6 +44,20 @@ export const api = {
   // Tool catalog (friendly built-in tools)
   getToolCatalog: () => req<CatalogTool[]>('/tool-catalog'),
 
+  // Upload a file to object storage (returns a public URL)
+  uploadFile: async (file: File) => {
+    const dataBase64 = await new Promise<string>((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).split(',')[1] ?? '');
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+    return req<{ url: string }>('/uploads', {
+      method: 'POST',
+      body: JSON.stringify({ filename: file.name, contentType: file.type, dataBase64 }),
+    });
+  },
+
   // Agents
   getAgents: () => req<Agent[]>('/agents'),
   getAgent: (id: string) => req<Agent>(`/agents/${id}`),
