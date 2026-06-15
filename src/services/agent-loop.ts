@@ -181,7 +181,7 @@ async function executeCustomApi(api: CustomApi, args: Record<string, unknown>): 
 
 const agentPhoneCache = new Map<string, string>();
 
-async function getAgentPhone(instance: string): Promise<string | null> {
+export async function getAgentPhone(instance: string): Promise<string | null> {
   if (agentPhoneCache.has(instance)) return agentPhoneCache.get(instance)!;
   try {
     const r = await fetch(`${config.evolution.url}/instance/fetchInstances`, {

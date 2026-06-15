@@ -10,6 +10,8 @@ import type { Router, Request, Response } from 'express';
 import { getRedis } from '../tools/redis.js';
 import { getDb } from '../tools/mongodb.js';
 import { scheduleDebounce } from './debounce.js';
+import { groupFilter, type GroupConfig } from './group-filter.js';
+import { getAgentPhone } from './agent-loop.js';
 import {
   classifyEvolutionMedia,
   fetchEvolutionMediaBase64,
@@ -37,6 +39,28 @@ interface RoutableAgent {
   tenantId: string;
   priority?: number;
   contactFilter?: Partial<ContactFilter>;
+  groupConfig?: GroupConfig;
+}
+
+/** Pull the reply/quote context out of any message type (for accurate group reply detection). */
+function extractReplyContext(message: Record<string, unknown>): { stanzaId?: string; participant?: string } {
+  const types = ['extendedTextMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage'];
+  for (const t of types) {
+    const ci = (message[t] as Record<string, unknown> | undefined)?.contextInfo as Record<string, unknown> | undefined;
+    if (ci?.stanzaId) return { stanzaId: String(ci.stanzaId), participant: ci.participant ? String(ci.participant) : undefined };
+  }
+  const ci2 = (message as Record<string, unknown>).contextInfo as Record<string, unknown> | undefined;
+  if (ci2?.stanzaId) return { stanzaId: String(ci2.stanzaId), participant: ci2.participant ? String(ci2.participant) : undefined };
+  return {};
+}
+
+/** Plain text from a message WITHOUT downloading/transcribing media (cheap, for the early gate). */
+function cheapText(message: Record<string, unknown>): string {
+  const ext = (message.extendedTextMessage as Record<string, unknown> | undefined)?.text;
+  const imgCap = (message.imageMessage as Record<string, unknown> | undefined)?.caption;
+  const vidCap = (message.videoMessage as Record<string, unknown> | undefined)?.caption;
+  const docCap = (message.documentMessage as Record<string, unknown> | undefined)?.caption;
+  return String(message.conversation ?? ext ?? imgCap ?? vidCap ?? docCap ?? '');
 }
 
 /** Does this agent's filter let a message from `senderPhone` in chat `jid` through? */
@@ -274,7 +298,7 @@ export async function handleEvolutionMessageWebhook(
   // Load ALL agents listening on this connection, in priority order (then age).
   const agents = (await db.collection('agents').find(
     { evolutionInstance: instance } as Record<string, unknown>,
-    { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, status: 1 } },
+    { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, groupConfig: 1, status: 1 } },
   ).toArray()) as unknown as Array<RoutableAgent & { status?: string }>;
   // Only active/pending agents participate; sort by priority asc, stable by id.
   const ordered = agents
@@ -311,6 +335,10 @@ export async function handleEvolutionMessageWebhook(
     const senderPhone = senderJid.replace(/@[^@]+$/, '').replace(/\D/g, '');
     const pushName = String(msg.pushName ?? '');
 
+    // Mark as "processed by Evolution path" so the Chatwoot fallback skips it — even
+    // if we filter it out below, so a filtered group message is never reprocessed.
+    await redis.set(`ev_proc:${msgId}`, '1', 'EX', EV_PROC_TTL);
+
     // Route to the owning agent (first whose blacklist/whitelist lets this chat through).
     const owner = routeAgent(ordered, jid, senderPhone);
     if (!owner) {
@@ -319,13 +347,37 @@ export async function handleEvolutionMessageWebhook(
     }
     const agentId = String(owner._id);
 
-    // Mark as "processed by Evolution path" so Chatwoot webhook skips it
-    await redis.set(`ev_proc:${msgId}`, '1', 'EX', EV_PROC_TTL);
-
-    // Extract text from various WhatsApp message types
     const message = (msg.message ?? {}) as Record<string, unknown>;
     const extMsg = (message.extendedTextMessage ?? {}) as Record<string, unknown>;
 
+    // ── EARLY group gate (before any media download/transcription = no wasted cost) ──
+    const reply = extractReplyContext(message);
+    let bufWaExternalId: string | null = reply.stanzaId ?? null;
+    if (isGroup) {
+      const gc: GroupConfig = owner.groupConfig ?? { respondToMentions: true, respondToReplies: true, respondToAll: false };
+      const botPhone = await getAgentPhone(instance);
+      const replyParticipant = (reply.participant ?? '').replace(/@[^@]+$/, '').replace(/\D/g, '');
+      // A reply counts toward "respondToReplies" only if it replies to the BOT's message.
+      const replyToBot = !!reply.stanzaId && (
+        !botPhone || !replyParticipant ||
+        replyParticipant === botPhone || botPhone.endsWith(replyParticipant) || replyParticipant.endsWith(botPhone)
+      );
+      const gate = groupFilter({
+        jid,
+        messageText: cheapText(message), // text only — audio NOT transcribed yet
+        waExternalId: replyToBot ? reply.stanzaId : null,
+        agentPhone: botPhone,
+        senderPhone,
+        groupConfig: gc,
+      });
+      if (!gate.pass) {
+        console.log(`[ev-webhook] group message ignored (no cost): ${gate.reason}`);
+        continue;
+      }
+      bufWaExternalId = replyToBot ? (reply.stanzaId ?? null) : null;
+    }
+
+    // Extract text from various WhatsApp message types
     let text = String(message.conversation ?? extMsg.text ?? '');
 
     // Multimodal input: classify + download + (audio) transcribe / (visual) attach base64
@@ -381,7 +433,7 @@ export async function handleEvolutionMessageWebhook(
       senderPhone,
       senderName: pushName || senderPhone || 'Usuário',
       contactJid: jid,
-      waExternalId: msgId,
+      waExternalId: bufWaExternalId, // real reply-to-bot id (groups) or null — not the msg's own id
       chatwootConvId: null, // no Chatwoot conv ID in direct Evolution path
       timestamp: Date.now(),
     });

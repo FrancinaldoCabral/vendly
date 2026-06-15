@@ -3,7 +3,6 @@ import { AuthProvider, useAuth } from './lib/auth';
 import Layout from './components/Layout';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
-import Agents from './pages/Agents';
 import Connections from './pages/Connections';
 import KnowledgeBase from './pages/KnowledgeBase';
 import ScheduledPosts from './pages/ScheduledPosts';
@@ -24,7 +23,7 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
           <Route path="/connections" element={<PrivateRoute><Connections /></PrivateRoute>} />
-          <Route path="/agents" element={<PrivateRoute><Agents /></PrivateRoute>} />
+          <Route path="/agents" element={<Navigate to="/connections" replace />} />
           <Route path="/knowledge" element={<PrivateRoute><KnowledgeBase /></PrivateRoute>} />
           <Route path="/scheduled-posts" element={<PrivateRoute><ScheduledPosts /></PrivateRoute>} />
           <Route path="/conversations" element={<PrivateRoute><Conversations /></PrivateRoute>} />

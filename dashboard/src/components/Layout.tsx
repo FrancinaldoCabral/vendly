@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Layout as AntLayout, Menu, Button, Typography, Avatar, Dropdown, Alert, message, Space } from 'antd';
 import {
-  RobotOutlined, BookOutlined, CalendarOutlined, MessageOutlined,
+  BookOutlined, CalendarOutlined, MessageOutlined,
   SettingOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined,
   UserOutlined, CommentOutlined, WhatsAppOutlined, InboxOutlined,
 } from '@ant-design/icons';
@@ -29,8 +29,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const configured = connections.length > 0;
 
   const menuItems = [
-    { key: '/connections', icon: <WhatsAppOutlined />, label: 'WhatsApp' },
-    { key: '/agents', icon: <RobotOutlined />, label: 'Agentes', disabled: !configured },
+    { key: '/connections', icon: <WhatsAppOutlined />, label: 'WhatsApp e agentes' },
     { key: '/knowledge', icon: <BookOutlined />, label: 'Conhecimento', disabled: !configured },
     { key: '/scheduled-posts', icon: <CalendarOutlined />, label: 'Postagens agendadas', disabled: !configured },
     { key: '/conversations', icon: <MessageOutlined />, label: 'Conversas', disabled: !configured },

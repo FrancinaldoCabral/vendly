@@ -39,6 +39,7 @@ export interface CatalogTool {
   id: string;
   label: string;
   description: string;
+  example: string;
   category: string;
   behavior: string;
 }

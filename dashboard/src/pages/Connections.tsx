@@ -1,24 +1,32 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Typography, Button, Card, Badge, Space, Modal, Form, Input, Popconfirm,
-  message, Result, Spin, Alert,
+  message, Result, Spin, Alert, Tag, Empty, Divider,
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, QrcodeOutlined, ReloadOutlined, WhatsAppOutlined,
+  RobotOutlined, EditOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import type { Connection } from '../lib/types';
+import type { Connection, Agent } from '../lib/types';
+import AgentModal from '../components/AgentModal';
 
 const { Title, Paragraph, Text } = Typography;
 
-function statusBadge(status: Connection['status']) {
+function connBadge(status: Connection['status']) {
   if (status === 'active') return { color: 'success' as const, label: 'Conectado' };
   if (status === 'pending_qr') return { color: 'warning' as const, label: 'Aguardando conexão' };
   return { color: 'default' as const, label: 'Pausado' };
 }
+function agentBadge(status: Agent['status']) {
+  if (status === 'active') return { color: 'success' as const, label: 'Ativo' };
+  if (status === 'pending_qr') return { color: 'warning' as const, label: 'Aguardando WhatsApp' };
+  if (status === 'paused') return { color: 'default' as const, label: 'Pausado' };
+  return { color: 'error' as const, label: 'Erro' };
+}
 
-// QR modal driven by the connection endpoints
+// ── QR modal (per connection) ────────────────────────────────────────────────
 function QrModal({ connectionId, name, open, onClose }: { connectionId: string; name: string; open: boolean; onClose: () => void }) {
   const [qrBase64, setQrBase64] = useState<string | null>(null);
   const [qrLoading, setQrLoading] = useState(false);
@@ -34,9 +42,7 @@ function QrModal({ connectionId, name, open, onClose }: { connectionId: string; 
       const d = await api.getConnectionQr(connectionId);
       if (d.base64) setQrBase64(d.base64);
       else setQrError('QR ainda não disponível — aguarde ou clique em Atualizar.');
-    } catch (e) {
-      setQrError((e as Error).message || 'Erro ao buscar o QR.');
-    }
+    } catch (e) { setQrError((e as Error).message || 'Erro ao buscar o QR.'); }
     setQrLoading(false);
   }, [connectionId]);
 
@@ -78,7 +84,7 @@ function QrModal({ connectionId, name, open, onClose }: { connectionId: string; 
       width={420}
     >
       {connected ? (
-        <Result status="success" title="WhatsApp conectado!" subTitle="Agora crie agentes que atendem por este número." />
+        <Result status="success" title="WhatsApp conectado!" subTitle="Agora adicione um agente a este número." />
       ) : (
         <div style={{ textAlign: 'center', padding: '8px 0' }}>
           <div style={{ width: 280, height: 280, margin: '0 auto 16px', background: '#f9f9f9', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', border: '2px solid #f0f0f0' }}>
@@ -97,13 +103,31 @@ function QrModal({ connectionId, name, open, onClose }: { connectionId: string; 
 }
 
 export default function Connections() {
-  const { data: connections = [], isLoading } = useQuery({ queryKey: ['connections'], queryFn: api.getConnections, refetchInterval: 15_000 });
   const qc = useQueryClient();
+  const { data: connections = [], isLoading } = useQuery({ queryKey: ['connections'], queryFn: api.getConnections, refetchInterval: 15_000 });
+  const { data: agents = [] } = useQuery({ queryKey: ['agents'], queryFn: api.getAgents, refetchInterval: 15_000 });
+  const { data: catalog = [] } = useQuery({ queryKey: ['tool-catalog'], queryFn: api.getToolCatalog });
+
   const [createOpen, setCreateOpen] = useState(false);
   const [form] = Form.useForm();
   const [qrConn, setQrConn] = useState<Connection | null>(null);
 
-  const create = useMutation({
+  // Agent modal state
+  const [agentModalOpen, setAgentModalOpen] = useState(false);
+  const [editAgent, setEditAgent] = useState<Agent | null>(null);
+  const [agentConn, setAgentConn] = useState<Connection | null>(null);
+
+  const agentsByConn = useMemo(() => {
+    const m = new Map<string, Agent[]>();
+    for (const a of agents) {
+      const k = a.connectionId ?? '__none__';
+      if (!m.has(k)) m.set(k, []);
+      m.get(k)!.push(a);
+    }
+    return m;
+  }, [agents]);
+
+  const createConn = useMutation({
     mutationFn: (name: string) => api.createConnection(name),
     onSuccess: ({ connection }) => {
       qc.invalidateQueries({ queryKey: ['connections'] });
@@ -114,75 +138,126 @@ export default function Connections() {
     onError: (e: Error) => message.error(e.message),
   });
 
-  const del = useMutation({
+  const delConn = useMutation({
     mutationFn: (id: string) => api.deleteConnection(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['connections'] }); qc.invalidateQueries({ queryKey: ['agents'] }); message.success('WhatsApp removido.'); },
     onError: (e: Error) => message.error(e.message),
   });
 
+  const delAgent = useMutation({
+    mutationFn: (id: string) => api.deleteAgent(id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['agents'] }); qc.invalidateQueries({ queryKey: ['connections'] }); message.success('Agente removido.'); },
+    onError: (e: Error) => message.error(e.message),
+  });
+
+  const openAddAgent = (conn: Connection) => { setEditAgent(null); setAgentConn(conn); setAgentModalOpen(true); };
+  const openEditAgent = (conn: Connection, a: Agent) => { setEditAgent(a); setAgentConn(conn); setAgentModalOpen(true); };
+
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <Title level={3} style={{ margin: 0 }}><WhatsAppOutlined /> WhatsApp</Title>
+        <Title level={3} style={{ margin: 0 }}><WhatsAppOutlined /> Meus WhatsApps</Title>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setCreateOpen(true); }}>
           Conectar um WhatsApp
         </Button>
       </div>
       <Paragraph type="secondary" style={{ marginBottom: 20 }}>
-        Cada WhatsApp conectado pode ser atendido por um ou vários agentes — por exemplo, um agente
-        para o grupo do restaurante e outro para o grupo dos entregadores, no mesmo número.
+        Conecte quantos números quiser. Dentro de cada número você cria os agentes que vão atender por ele —
+        pode ser <b>um número com um agente</b>, <b>vários números com agentes diferentes</b>, ou
+        <b> um número com vários agentes</b> (ex.: um para o grupo do restaurante e outro para o dos entregadores).
       </Paragraph>
 
       {connections.length === 0 && !isLoading && (
         <Card>
-          <div style={{ textAlign: 'center', padding: 40 }}>
-            <WhatsAppOutlined style={{ fontSize: 48, color: '#d9d9d9', marginBottom: 16 }} />
-            <Title level={4} type="secondary">Nenhum WhatsApp conectado</Title>
-            <Paragraph type="secondary">Conecte seu primeiro número para começar a atender.</Paragraph>
+          <Empty
+            image={<WhatsAppOutlined style={{ fontSize: 48, color: '#d9d9d9' }} />}
+            description={<span>Nenhum WhatsApp conectado.<br />Conecte seu primeiro número para começar.</span>}
+          >
             <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setCreateOpen(true); }}>Conectar um WhatsApp</Button>
-          </div>
+          </Empty>
         </Card>
       )}
 
-      <Space direction="vertical" style={{ width: '100%' }} size={16}>
+      <Space direction="vertical" style={{ width: '100%' }} size={20}>
         {connections.map(conn => {
-          const sb = statusBadge(conn.status);
+          const sb = connBadge(conn.status);
+          const list = agentsByConn.get(conn._id) ?? [];
+          const isConnected = conn.status === 'active';
           return (
-            <Card key={conn._id} styles={{ body: { padding: '16px 24px' } }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-                <div style={{ flex: 1, minWidth: 200 }}>
+            <Card key={conn._id} styles={{ body: { padding: 0 } }}>
+              {/* WhatsApp header */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', padding: '16px 20px', borderBottom: '1px solid #f0f0f0', background: '#fafafa', borderRadius: '8px 8px 0 0' }}>
+                <WhatsAppOutlined style={{ fontSize: 22, color: '#25D366' }} />
+                <div style={{ flex: 1, minWidth: 180 }}>
                   <Text strong style={{ fontSize: 16 }}>{conn.name}</Text>
-                  <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-                    <Badge status={sb.color} text={sb.label} />
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {conn.agentCount ?? 0} agente{(conn.agentCount ?? 0) === 1 ? '' : 's'}
-                    </Text>
-                  </div>
+                  <div style={{ marginTop: 2 }}><Badge status={sb.color} text={sb.label} /></div>
                 </div>
                 <Space wrap>
                   <Button type={conn.status === 'pending_qr' ? 'primary' : 'default'} icon={<QrcodeOutlined />} onClick={() => setQrConn(conn)}>
-                    {conn.status === 'pending_qr' ? 'Conectar WhatsApp' : 'Reconectar / QR'}
+                    {conn.status === 'pending_qr' ? 'Conectar' : 'Reconectar / QR'}
                   </Button>
                   <Popconfirm
                     title={`Remover "${conn.name}"?`}
-                    description="Isso desconecta o número e remove os agentes ligados a ele."
-                    onConfirm={() => del.mutate(conn._id)}
+                    description="Desconecta o número e remove os agentes dele."
+                    onConfirm={() => delConn.mutate(conn._id)}
                     okText="Remover" okButtonProps={{ danger: true }}
                   >
-                    <Button danger icon={<DeleteOutlined />}>Remover</Button>
+                    <Button danger icon={<DeleteOutlined />} />
                   </Popconfirm>
                 </Space>
+              </div>
+
+              {/* Agents inside this WhatsApp */}
+              <div style={{ padding: '12px 20px 16px' }}>
+                {!isConnected && (
+                  <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+                    message="Conecte este WhatsApp (botão Conectar) para os agentes começarem a atender." />
+                )}
+                {list.length === 0 ? (
+                  <div style={{ padding: '8px 0' }}>
+                    <Text type="secondary" style={{ fontSize: 13 }}>Nenhum agente neste número ainda.</Text>
+                  </div>
+                ) : (
+                  list.map(a => {
+                    const ab = agentBadge(a.status);
+                    return (
+                      <div key={a._id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid #f5f5f5' }}>
+                        <RobotOutlined style={{ fontSize: 18, color: '#0d9488' }} />
+                        <div style={{ flex: 1, minWidth: 160 }}>
+                          <Text strong>{a.name}</Text>
+                          {a.assistantName && <Text type="secondary" style={{ fontSize: 13 }}> ({a.assistantName})</Text>}
+                          <div style={{ marginTop: 2, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                            <Badge status={ab.color} text={ab.label} />
+                            {a.contactFilter?.mode === 'whitelist'
+                              ? <Tag color="blue" style={{ fontSize: 11 }}>Atende lista específica</Tag>
+                              : (a.contactFilter?.contacts?.length || a.contactFilter?.groups?.length)
+                                ? <Tag style={{ fontSize: 11 }}>Com bloqueios</Tag>
+                                : <Tag style={{ fontSize: 11 }}>Atende todos</Tag>}
+                          </div>
+                        </div>
+                        <Button size="small" icon={<EditOutlined />} onClick={() => openEditAgent(conn, a)}>Editar</Button>
+                        <Popconfirm title={`Remover agente "${a.name}"?`} description="Remove o agente e sua base de conhecimento." onConfirm={() => delAgent.mutate(a._id)} okText="Remover" okButtonProps={{ danger: true }}>
+                          <Button size="small" danger icon={<DeleteOutlined />} />
+                        </Popconfirm>
+                      </div>
+                    );
+                  })
+                )}
+                <Button type="dashed" icon={<PlusOutlined />} onClick={() => openAddAgent(conn)} style={{ marginTop: 12 }}>
+                  Adicionar agente a este WhatsApp
+                </Button>
               </div>
             </Card>
           );
         })}
       </Space>
 
+      {/* Create connection */}
       <Modal
         title="Conectar um novo WhatsApp"
         open={createOpen}
-        onOk={() => form.validateFields().then(v => create.mutate(v.name))}
-        confirmLoading={create.isPending}
+        onOk={() => form.validateFields().then(v => createConn.mutate(v.name))}
+        confirmLoading={createConn.isPending}
         onCancel={() => setCreateOpen(false)}
         okText="Criar e gerar QR"
       >
@@ -197,6 +272,16 @@ export default function Connections() {
       {qrConn && (
         <QrModal connectionId={qrConn._id} name={qrConn.name} open={!!qrConn} onClose={() => setQrConn(null)} />
       )}
+
+      <AgentModal
+        open={agentModalOpen}
+        agent={editAgent}
+        connectionId={agentConn?._id}
+        connectionName={agentConn?.name}
+        catalog={catalog}
+        onClose={() => setAgentModalOpen(false)}
+      />
+      <Divider style={{ opacity: 0 }} />
     </div>
   );
 }
