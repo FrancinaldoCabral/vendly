@@ -58,9 +58,18 @@ export interface AgentAssets {
   contacts?: { label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }[];
 }
 
+/** Normalize reactions: tolerate the legacy `string[]` (emoji-only) shape. */
+function reactionList(assets: AgentAssets | undefined): { label: string; emoji: string }[] {
+  const raw = (assets?.reactions ?? []) as unknown[];
+  return raw
+    .map(r => typeof r === 'string' ? { label: r, emoji: r } : (r as { label: string; emoji: string }))
+    .filter(r => r && r.emoji);
+}
+
 /** Allowed values for an action's selector — always the configured item labels. */
 function assetValues(kind: string, assets: AgentAssets | undefined): string[] {
   if (!assets) return [];
+  if (kind === 'reactions') return reactionList(assets).map(r => r.label).filter(Boolean);
   const list = (assets as Record<string, Array<{ label?: string }>>)[kind] ?? [];
   return list.map(i => i.label ?? '').filter(Boolean);
 }
@@ -196,13 +205,18 @@ function buildCatalogCall(
       return { name: 'evolution_send_text', payload: { instanceName, number, text } };
     }
     case 'acao_reagir': {
-      const rcfg = (assets?.reactions ?? []).find(r => r.label === args.reacao);
-      if (!rcfg || !rcfg.emoji) return { error: `reação "${String(args.reacao)}" não cadastrada` };
+      const sel = String(args.reacao ?? '');
+      // Tolerate the LLM passing either the label or the emoji itself (and legacy string config).
+      const rcfg = reactionList(assets).find(r => r.label === sel || r.emoji === sel);
+      if (!rcfg || !rcfg.emoji) return { error: `reação "${sel}" não cadastrada` };
       const emoji = rcfg.emoji;
-      // Default: react to the last message. If the agent passed a snippet, react to that one.
+      // Target priority: explicit message id → text snippet → the client's last message.
       let messageId = ctx.lastMessageId;
+      const byId = args.mensagem_id ? String(args.mensagem_id).trim() : '';
       const ref = args.referencia ? String(args.referencia).toLowerCase().trim() : '';
-      if (ref) {
+      if (byId) {
+        messageId = byId; // the LLM may target any message in the conversation by id
+      } else if (ref) {
         const found = (ctx.recentMessages ?? []).find(m => {
           const t = (m.text ?? '').toLowerCase();
           return t.includes(ref) || (ref.length > 8 && t.length > 3 && ref.includes(t));
@@ -403,6 +417,22 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
   }
 
   const tools = buildToolList(agent);
+
+  // If the agent can react, let it target a specific message: show recent messages with
+  // their ids right after the system prompt. (Reacting to an arbitrary message in the SAME
+  // conversation is low-risk; the destination contact is still fixed by the platform.)
+  if ((agent.builtinTools ?? []).includes('acao_reagir') && ctx.recentMessages?.length) {
+    const lines = ctx.recentMessages.slice(0, 12)
+      .map(m => `id=${m.id} → "${(m.text ?? '').slice(0, 80)}"`).join('\n');
+    const note: OpenRouterMessage = {
+      role: 'system',
+      content: `Mensagens recentes desta conversa (mais novas primeiro). Para reagir a uma mensagem `
+        + `específica, chame a ação de reagir com "mensagem_id" igual ao id exato abaixo. `
+        + `Se omitir, a reação vai para a última mensagem do cliente.\n${lines}`,
+    };
+    if (messages[0]?.role === 'system') messages.splice(1, 0, note); else messages.unshift(note);
+  }
+
   let modelInUse = agent.model;
   let currentBody: Record<string, unknown> = {
     model: modelInUse,
@@ -535,8 +565,10 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
           );
           const label = CATALOG_BY_ID.get(toolName)?.label ?? toolName;
           if ('error' in built) {
+            console.warn(`[agent-loop]   action=${toolName} BLOCKED: ${built.error} args=${JSON.stringify(args)}`);
             content = `Não foi possível executar "${label}": ${built.error}. Avise o cliente com naturalidade.`;
           } else {
+            console.log(`[agent-loop]   action=${toolName} → ${built.name} payload=${JSON.stringify(built.payload).slice(0, 200)}`);
             const raw = await routeBuiltinTool(built.name, built.payload);
             content = raw.startsWith('❌')
               ? `A ação "${label}" falhou. Avise o cliente com gentileza, sem detalhes técnicos.`

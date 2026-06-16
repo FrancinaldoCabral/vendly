@@ -50,7 +50,8 @@ export const TOOL_CATALOG: CatalogTool[] = [
       required: ['reacao'],
       properties: {
         reacao: { type: 'string', description: 'Qual reação usar (use exatamente um dos rótulos disponíveis)' },
-        referencia: { type: 'string', description: 'Opcional: um trecho da mensagem a reagir. Deixe vazio para reagir à última mensagem do cliente.' },
+        mensagem_id: { type: 'string', description: 'Opcional: o id exato da mensagem a reagir (veja a lista de mensagens recentes). Deixe vazio para reagir à última mensagem do cliente.' },
+        referencia: { type: 'string', description: 'Opcional: um trecho da mensagem a reagir, caso não tenha o id.' },
       },
     },
   },
