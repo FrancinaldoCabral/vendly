@@ -288,15 +288,23 @@ async function routeBuiltinTool(name: string, args: Record<string, unknown>): Pr
   return `❌ Ferramenta não encontrada: ${name}`;
 }
 
-async function executeCustomApi(api: CustomApi, args: Record<string, unknown>): Promise<string> {
+async function executeCustomApi(api: CustomApi, args: Record<string, unknown>, callbackUrl?: string): Promise<string> {
   const method = api.method.toUpperCase();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   for (const h of api.headers ?? []) {
     if (h.key) headers[h.key] = h.value;
   }
 
+  // For "demorada" (async) tools: the return URL is provided as the {url_de_retorno}
+  // placeholder (so the user positions it where THEIR API expects it — body/header/URL)
+  // AND always as the X-Callback-Url header. We never guess the API's field name.
+  const subArgs = callbackUrl
+    ? { ...args, url_de_retorno: callbackUrl, callback_url: callbackUrl }
+    : args;
+  if (callbackUrl) headers['X-Callback-Url'] = callbackUrl;
+
   // Replace {param} placeholders in the URL (path/query-safe encoding); leave unknowns intact.
-  const url = api.url.replace(/\{(\w+)\}/g, (m, k) => (k in args ? encodeURIComponent(String(args[k])) : m));
+  const url = api.url.replace(/\{(\w+)\}/g, (m, k) => (k in subArgs ? encodeURIComponent(String(subArgs[k])) : m));
 
   // Body modes (non-GET): static template, mixed template, or full LLM args.
   let body: string | undefined;
@@ -305,12 +313,12 @@ async function executeCustomApi(api: CustomApi, args: Record<string, unknown>): 
     if (tpl) {
       // Fill {param} with JSON-safe values so a template like {"qtd":{qtd},"nome":"{nome}"} stays valid.
       body = tpl.replace(/\{(\w+)\}/g, (m, k) => {
-        if (!(k in args)) return m;
-        const v = args[k];
+        if (!(k in subArgs)) return m;
+        const v = subArgs[k];
         return typeof v === 'number' || typeof v === 'boolean' ? String(v) : JSON.stringify(String(v)).slice(1, -1);
       });
-    } else if (Object.keys(args).length > 0) {
-      body = JSON.stringify(args); // LLM decides the whole body
+    } else if (Object.keys(subArgs).length > 0) {
+      body = JSON.stringify(subArgs); // LLM decides the whole body
     }
     // else: no schema and no template → pure trigger, no body
   }
@@ -618,7 +626,7 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
                 'EX', 60 * 60 * 6, // 6h to receive the callback
               );
               const callbackUrl = `${config.app.url}/webhook/tool-result/${token}`;
-              await executeCustomApi(customApi, { ...args, callback_url: callbackUrl }).catch(() => {});
+              await executeCustomApi(customApi, args, callbackUrl).catch(() => {});
               const waiting = customApi.waitingMessage || toolName;
               content = `[ASYNC] A ferramenta "${toolName}" foi acionada e está processando em segundo plano. `
                 + `Diga ao cliente, de forma natural e curta, que você está verificando "${waiting}" e que retorna em breve. `

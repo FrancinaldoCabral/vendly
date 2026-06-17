@@ -264,10 +264,20 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
             <Select options={KIND_OPTS} />
           </Form.Item>
           {kind === 'async' && (
-            <Form.Item name="waitingMessage" label="O que o agente está verificando (texto curto)"
-              extra='Usado na mensagem "estou verificando ___…".'>
-              <Input placeholder="o status do seu pedido" />
-            </Form.Item>
+            <>
+              <Form.Item name="waitingMessage" label="O que o agente está verificando (texto curto)"
+                extra='Usado na mensagem "estou verificando ___…".'>
+                <Input placeholder="o status do seu pedido" />
+              </Form.Item>
+              <Alert type="info" showIcon style={{ marginBottom: 16 }}
+                message="Como o resultado volta pra conversa"
+                description={<span style={{ fontSize: 12 }}>
+                  Geramos um endereço de retorno único por chamada. Coloque a máscara <code>{'{url_de_retorno}'}</code> onde
+                  o seu sistema espera o endereço — num campo do corpo (ex.: <code>{'"webhook":"{url_de_retorno}"'}</code>),
+                  num cabeçalho, ou na URL. Também enviamos sempre no cabeçalho <code>X-Callback-Url</code>.<br />
+                  Quando terminar, o seu sistema faz um <b>POST</b> nesse endereço com <code>{'{"result":"texto da resposta"}'}</code> — o agente então manda a mensagem final ao cliente.
+                </span>} />
+            </>
           )}
           <Form.Item name="url" label="Endereço (URL)" rules={[{ required: true }]}
             extra="Use {parametro} para inserir valores. Ex.: https://meusistema.com/pedidos/{numero}">
