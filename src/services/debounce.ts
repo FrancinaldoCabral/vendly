@@ -346,37 +346,29 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     if (i < chunks.length - 1) await sleep(700);
   }
 
-  // Sync to Chatwoot
-  const cleanOutgoing = content.replace(/\[ESCALAR_HUMANO\]/g, '').trim();
-
+  // Chatwoot mirroring is handled by Evolution's own integration (this inbox is an
+  // Evolution API channel). We must NOT post messages ourselves — posting "outgoing" makes
+  // Chatwoot try to re-deliver them through Evolution, causing duplicates and "Failed to send".
+  // We only RESOLVE the conversation id, for labels and escalation.
   let resolvedConvId: number | null = chatwootConvId ?? null;
-  if (chatwootConvId) {
-    // Chatwoot path: we know the conversation ID — use it directly
-    await syncChatwootOutgoing(chatwootConvId, content, cwAccountId, cwApiKey);
-  } else if (agentDoc.chatwootInboxId && cwAccountId && cwApiKey) {
-    // Evolution path: no Chatwoot conv ID known — find/create contact+conversation and sync
-    await sleep(1500); // brief wait so Evolution's own integration can create the conversation first
-    resolvedConvId = await syncEvolutionToChaTwoot(
-      contactJid,
-      senderPhone,
-      senderName,
-      consolidatedText,
-      cleanOutgoing,
-      agentDoc.chatwootInboxId,
-      cwAccountId,
-      cwApiKey,
-    );
+  if (!resolvedConvId && agentDoc.chatwootInboxId && cwAccountId && cwApiKey && (labels?.length || escalate)) {
+    await sleep(1500); // let Evolution's integration create the conversation first
+    resolvedConvId = await resolveChatwootConversation(senderPhone, agentDoc.chatwootInboxId, cwAccountId, cwApiKey);
   }
 
-  // Apply CRM labels the agent chose (merged with existing) to the resolved conversation.
-  if (labels?.length && resolvedConvId && cwAccountId && cwApiKey) {
-    await applyChatwootLabels(resolvedConvId, labels, cwAccountId, cwApiKey);
+  // Apply CRM labels the agent chose (ensure they exist, then merge onto the conversation).
+  if (labels?.length) {
+    if (resolvedConvId && cwAccountId && cwApiKey) {
+      await applyChatwootLabels(resolvedConvId, labels, cwAccountId, cwApiKey);
+    } else {
+      console.warn(`[debounce] labels requested but no Chatwoot conversation resolved (agent=${agentId} phone=${senderPhone})`);
+    }
   }
 
   // Escalation: assign to human team/agent
-  if (escalate && chatwootConvId) {
+  if (escalate && resolvedConvId) {
     await escalateToHuman(
-      chatwootConvId,
+      resolvedConvId,
       agentDoc.escalationTeamId,
       agentDoc.escalationAgentId,
       cwAccountId,
@@ -443,10 +435,6 @@ export async function handleToolResult(token: string, resultText: string): Promi
   const agentDoc = await db.collection<AgentDoc>('agents').findOne({ _id: p.agentId, tenantId: p.tenantId });
   if (!agentDoc) { console.error(`[tool-result] agent not found ${p.agentId}`); return; }
 
-  const tenantDoc = await db.collection<TenantDoc>('tenants').findOne({ _id: p.tenantId });
-  const cwAccountId = tenantDoc?.chatwoot?.accountId?.toString() ?? agentDoc.chatwootAccountId ?? '';
-  const cwApiKey = tenantDoc?.chatwoot?.apiKey ?? '';
-
   const jidKey = p.contactJid.replace(/[^a-z0-9]/gi, '_');
   const activeSessionKey = `sessao:t:${p.tenantId}:${p.agentId}:${jidKey}`;
   const sessionRaw = await redis.get(activeSessionKey);
@@ -478,7 +466,6 @@ export async function handleToolResult(token: string, resultText: string): Promi
         tools: agentDoc.tools ?? ['evolution', 'chatwoot'],
         builtinTools: agentDoc.builtinTools ?? [],
         customApis: agentDoc.customApis ?? [],
-        chatwootAccountId: cwAccountId,
       },
     });
   } catch (e) {
@@ -494,10 +481,7 @@ export async function handleToolResult(token: string, resultText: string): Promi
     await sendEvolutionText(p.instance, p.contactJid, chunks[i]);
     if (i < chunks.length - 1) await sleep(700);
   }
-
-  if (p.chatwootConvId) {
-    await syncChatwootOutgoing(p.chatwootConvId, content, cwAccountId, cwApiKey);
-  }
+  // No Chatwoot posting here — Evolution's integration mirrors the message we just sent.
 
   let newHistory: OpenRouterMessage[] = [...history, { role: 'user', content: note }, { role: 'assistant', content }];
   newHistory = capHistory(await summarizeIfNeeded(newHistory, agentDoc.systemPrompt, agentDoc.model ?? config.openrouter.chatModel));
@@ -654,26 +638,6 @@ async function sendEvolutionAudio(instance: string, jid: string, base64: string)
   }
 }
 
-async function syncChatwootOutgoing(
-  conversationId: number,
-  content: string,
-  accountId: string,
-  apiKey: string,
-): Promise<void> {
-  if (!accountId || !apiKey) return;
-  const url = `${config.chatwoot.url}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
-  const clean = content.replace(/\[ESCALAR_HUMANO\]/g, '').trim();
-  try {
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'api_access_token': apiKey },
-      body: JSON.stringify({ content: clean, message_type: 'outgoing', private: false }),
-    });
-  } catch (e) {
-    console.error(`[debounce] Chatwoot sync failed:`, String(e));
-  }
-}
-
 async function escalateToHuman(
   conversationId: number,
   teamId?: number,
@@ -698,142 +662,47 @@ async function escalateToHuman(
 }
 
 /**
- * Explicitly sync a WhatsApp exchange to Chatwoot when the Evolution-path processes a message.
- * Evolution's built-in Chatwoot integration may not mirror outgoing messages sent via sendText,
- * so we do it ourselves to guarantee conversations appear in the CRM.
- *
- * Logic:
- *  - Find or create Chatwoot contact by phone
- *  - If no open conversation exists for this inbox → create it AND add the incoming message
- *    (means Evolution didn't mirror it; we fill the gap)
- *  - Always add our outgoing response (Evolution never mirrors sendText → Chatwoot for this)
+ * Resolve the Chatwoot conversation id for a contact (by phone) in our inbox.
+ * Read-only — Evolution's integration creates/mirrors conversations; we just locate the id
+ * so we can apply labels / escalate. Never posts or creates anything.
  */
-async function syncEvolutionToChaTwoot(
-  contactJid: string,
+async function resolveChatwootConversation(
   senderPhone: string,
-  senderName: string,
-  incomingText: string,
-  outgoingText: string,
   inboxId: number,
   accountId: string,
   apiKey: string,
 ): Promise<number | null> {
-  if (!accountId || !apiKey || !inboxId) return null;
-
+  if (!accountId || !apiKey || !inboxId || !senderPhone) return null;
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'api_access_token': apiKey,
-  };
-
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'api_access_token': apiKey };
+  const bare = senderPhone.replace(/\D/g, '');
   try {
-    // 1. Find or create contact
-    const phone = senderPhone
-      ? (senderPhone.startsWith('+') ? senderPhone : `+${senderPhone}`)
-      : '';
-    let contactId: number | null = null;
+    const sr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(bare)}&page=1`, { headers });
+    if (!sr.ok) { console.warn(`[debounce] Chatwoot contact search ${sr.status}`); return null; }
+    const data = await sr.json() as { payload?: Array<{ id: number; phone_number?: string }> };
+    const found = (data.payload ?? []).find(c => {
+      const p = (c.phone_number ?? '').replace(/\D/g, '');
+      return p && (p.endsWith(bare) || bare.endsWith(p));
+    }) ?? (data.payload ?? [])[0];
+    if (!found) { console.warn(`[debounce] Chatwoot: no contact for ${bare}`); return null; }
 
-    if (phone) {
-      const bare = senderPhone.replace(/\D/g, '');
-      const sr = await fetch(
-        `${cwUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(phone)}&page=1`,
-        { headers },
-      );
-      if (sr.ok) {
-        const data = await sr.json() as { payload?: Array<{ id: number; phone_number?: string }> };
-        const found = (data.payload ?? []).find(c =>
-          (c.phone_number ?? '').replace(/\D/g, '').endsWith(bare) ||
-          bare.endsWith((c.phone_number ?? '').replace(/\D/g, '')),
-        );
-        contactId = found?.id ?? null;
-      }
-    }
-
-    if (!contactId) {
-      const cr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          name: senderName || phone || 'Contato WhatsApp',
-          phone_number: phone || undefined,
-          identifier: contactJid || senderPhone || undefined,
-        }),
-      });
-      if (cr.ok) {
-        const c = await cr.json() as { id?: number };
-        contactId = c.id ?? null;
-      }
-    }
-
-    if (!contactId) {
-      console.warn('[debounce] Chatwoot sync: could not find/create contact');
-      return null;
-    }
-
-    // 2. Find open conversation for this contact in our inbox
-    let convId: number | null = null;
-    const convsRes = await fetch(
-      `${cwUrl}/api/v1/accounts/${accountId}/contacts/${contactId}/conversations`,
-      { headers },
-    );
-    if (convsRes.ok) {
-      const data = await convsRes.json() as {
-        payload?: Array<{ id: number; inbox_id: number; status: string }>;
-      };
-      const open = (data.payload ?? []).find(
-        c => c.inbox_id === inboxId && c.status !== 'resolved',
-      );
-      convId = open?.id ?? null;
-    }
-
-    const isNewConv = !convId;
-    if (!convId) {
-      const ccr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/conversations`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ inbox_id: inboxId, contact_id: contactId, status: 'open' }),
-      });
-      if (ccr.ok) {
-        const conv = await ccr.json() as { id?: number };
-        convId = conv.id ?? null;
-      }
-    }
-
-    if (!convId) {
-      console.warn('[debounce] Chatwoot sync: could not find/create conversation');
-      return null;
-    }
-
-    // 3. Add incoming message only when we created the conversation
-    //    (if Evolution already mirrored it, the conversation already existed → skip to avoid dup)
-    if (isNewConv && incomingText) {
-      await fetch(`${cwUrl}/api/v1/accounts/${accountId}/conversations/${convId}/messages`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ content: incomingText, message_type: 'incoming', private: false }),
-      });
-    }
-
-    // 4. Always add outgoing — Evolution sendText does NOT mirror to Chatwoot
-    if (outgoingText) {
-      await fetch(`${cwUrl}/api/v1/accounts/${accountId}/conversations/${convId}/messages`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ content: outgoingText, message_type: 'outgoing', private: false }),
-      });
-    }
-
-    console.log(`[debounce] Chatwoot synced: contact=${contactId} conv=${convId} newConv=${isNewConv}`);
-    return convId;
+    const cr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts/${found.id}/conversations`, { headers });
+    if (!cr.ok) return null;
+    const cd = await cr.json() as { payload?: Array<{ id: number; inbox_id: number; status: string }> };
+    const convs = cd.payload ?? [];
+    const conv = convs.find(c => c.inbox_id === inboxId && c.status !== 'resolved')
+      ?? convs.find(c => c.inbox_id === inboxId) ?? convs[0];
+    return conv?.id ?? null;
   } catch (e) {
-    console.error('[debounce] Chatwoot explicit sync failed:', String(e));
+    console.error('[debounce] resolveChatwootConversation failed:', String(e));
     return null;
   }
 }
 
 /**
- * Apply CRM labels to a Chatwoot conversation, MERGING with existing labels
- * (the labels endpoint replaces the full set, so we fetch + union first).
+ * Apply CRM labels to a Chatwoot conversation. Ensures each label exists at the account
+ * level first (so it shows up properly), then MERGES with the conversation's existing labels
+ * (the endpoint replaces the full set, so we fetch + union).
  */
 async function applyChatwootLabels(
   conversationId: number,
@@ -843,18 +712,39 @@ async function applyChatwootLabels(
 ): Promise<void> {
   if (!accountId || !apiKey || !conversationId || labels.length === 0) return;
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
-  const url = `${cwUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/labels`;
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'api_access_token': apiKey };
+  // Chatwoot label titles are lowercase/sluggy; normalize so create + apply match.
+  const wanted = labels.map(l => l.trim().toLowerCase().replace(/\s+/g, '-')).filter(Boolean);
   try {
+    // 1. Ensure each label exists as an account label.
+    const existingTitles = new Set<string>();
+    const lr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/labels`, { headers });
+    if (lr.ok) {
+      const ld = await lr.json() as { payload?: Array<{ title: string }> };
+      (ld.payload ?? []).forEach(l => existingTitles.add(l.title));
+    }
+    for (const t of wanted) {
+      if (!existingTitles.has(t)) {
+        const cr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/labels`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ title: t, color: '#1f93ff', show_on_sidebar: true }),
+        });
+        console.log(`[debounce] Chatwoot label create "${t}": ${cr.status}`);
+      }
+    }
+
+    // 2. Merge onto the conversation.
+    const url = `${cwUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/labels`;
     let existing: string[] = [];
     const gr = await fetch(url, { headers });
     if (gr.ok) {
       const d = await gr.json() as { payload?: string[] };
       existing = Array.isArray(d.payload) ? d.payload : [];
     }
-    const merged = Array.from(new Set([...existing, ...labels]));
-    await fetch(url, { method: 'POST', headers, body: JSON.stringify({ labels: merged }) });
-    console.log(`[debounce] Chatwoot labels applied conv=${conversationId} labels=[${merged.join(',')}]`);
+    const merged = Array.from(new Set([...existing, ...wanted]));
+    const pr = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ labels: merged }) });
+    const body = await pr.text();
+    console.log(`[debounce] Chatwoot labels conv=${conversationId} status=${pr.status} labels=[${merged.join(',')}] resp=${body.slice(0, 150)}`);
   } catch (e) {
     console.error('[debounce] Chatwoot label apply failed:', String(e));
   }
