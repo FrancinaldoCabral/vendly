@@ -103,26 +103,37 @@ interface ChatwootMessage {
   };
 }
 
+interface ChatwootConversation {
+  id?: number;
+  status?: string;            // 'open' | 'pending' | 'resolved' | 'snoozed'
+  assignee?: unknown;         // set when a human agent is assigned
+  assignee_id?: number | null;
+  inbox_id?: number;
+  meta?: {
+    assignee?: { id?: number } | null;
+    sender?: { name?: string; phone_number?: string; identifier?: string };
+  };
+}
+
 interface ChatwootPayload {
   event?: string;
   message_type?: string;
   message?: ChatwootMessage;
-  conversation?: {
-    id?: number;
-    assignee?: unknown;
-    inbox_id?: number;
-    meta?: {
-      sender?: {
-        name?: string;
-        phone_number?: string;
-        identifier?: string;
-      };
-    };
-  };
+  conversation?: ChatwootConversation;
   contact?: {
     phone_number?: string;
     name?: string;
     identifier?: string;
+  };
+  // conversation_* events deliver the conversation fields at the TOP level too.
+  id?: number;
+  status?: string;
+  assignee?: unknown;
+  assignee_id?: number | null;
+  inbox_id?: number;
+  meta?: {
+    assignee?: { id?: number } | null;
+    sender?: { name?: string; phone_number?: string; identifier?: string };
   };
 }
 
@@ -161,11 +172,65 @@ export function registerWebhookRoute(router: Router): void {
     const body = req.body as ChatwootPayload;
 
     try {
-      await handleChatwootWebhook(subjectId, body);
+      const event = body.event ?? '';
+      if (event.startsWith('conversation_')) {
+        await handleChatwootHandoff(subjectId, body);
+      } else {
+        await handleChatwootWebhook(subjectId, body);
+      }
     } catch (e) {
       console.error(`[webhook] Error subjectId=${subjectId}:`, String(e));
     }
   });
+}
+
+/**
+ * Bot <-> human handoff, driven by Chatwoot conversation assignment (like the old system):
+ *  - a human agent is assigned (and not resolved) -> pause the bot for that contact
+ *  - unassigned ("none") OR resolved -> the bot resumes
+ * The bot itself can escalate by assigning the conversation to a human (escalateToHuman),
+ * which lands here as an assignment and pauses the bot.
+ */
+async function handleChatwootHandoff(subjectId: string, payload: ChatwootPayload): Promise<void> {
+  // conversation_* events carry the conversation either nested or at top level.
+  const conv: ChatwootConversation = payload.conversation ?? {
+    id: payload.id, status: payload.status, assignee: payload.assignee,
+    assignee_id: payload.assignee_id, inbox_id: payload.inbox_id, meta: payload.meta,
+  };
+  const convId = conv.id;
+  if (!convId) return;
+
+  const { senderPhone, contactJid } = extractSender(
+    payload.conversation ? payload : ({ ...payload, conversation: conv } as ChatwootPayload),
+  );
+  if (!contactJid && !senderPhone) { console.warn(`[handoff] no contact in conversation_updated subjectId=${subjectId}`); return; }
+
+  const candidates = await resolveChatwootAgents(subjectId);
+  if (candidates.length === 0) return;
+  const owner = routeAgent(candidates, contactJid, senderPhone) ?? candidates[0];
+  const tenantId = owner.tenantId;
+
+  // Is a human currently assigned?
+  const assigneeId = conv.assignee_id ?? conv.meta?.assignee?.id ?? payload.assignee_id ?? payload.meta?.assignee?.id ?? null;
+  const assigned = !!conv.assignee || !!conv.meta?.assignee || !!payload.assignee || !!payload.meta?.assignee || !!assigneeId;
+  const resolved = (conv.status ?? payload.status) === 'resolved';
+  const humanActive = assigned && !resolved;
+
+  // Must match the key the debounce worker checks: human_takeover:t:{tenant}:{agent}:{jidKey}
+  // where jidKey is the sanitized contact JID. Fall back to a phone-derived JID if needed.
+  const jid = contactJid || (senderPhone ? `${senderPhone}@s.whatsapp.net` : '');
+  if (!jid) return;
+  const jidKey = jid.replace(/[^a-z0-9]/gi, '_');
+  const key = `human_takeover:t:${tenantId}:${owner._id}:${jidKey}`;
+  const redis = getRedis();
+
+  if (humanActive) {
+    await redis.set(key, '1', 'EX', 60 * 60 * 24 * 7); // 7 days
+    console.log(`[handoff] PAUSE bot agent=${owner._id} conv=${convId} jid=${jid} (assigneeId=${assigneeId} status=${conv.status ?? payload.status})`);
+  } else {
+    await redis.del(key);
+    console.log(`[handoff] RESUME bot agent=${owner._id} conv=${convId} jid=${jid} (assigned=${assigned} resolved=${resolved})`);
+  }
 }
 
 /** Resolve the candidate agents for a Chatwoot webhook subject (connection or legacy agent). */
