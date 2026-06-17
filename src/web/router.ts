@@ -265,6 +265,79 @@ apiRouter.post('/admin/fix-agent', requireAuth, requireAdmin, async (req, res) =
   }
 });
 
+// ── Admin: seed example integrations (custom APIs) so the client can see/test them ──
+// Demonstrates the three body modes against reliable public endpoints:
+//  - GET with a URL placeholder (consultar_cep → viacep)
+//  - POST with a STATIC body (registrar_atendimento → httpbin echoes it back)
+//  - POST with a MIXED body (enviar_para_fluxo → agent fills {nome}/{mensagem})
+const EXAMPLE_INTEGRATIONS = [
+  {
+    name: 'consultar_cep',
+    description: 'Consulta o endereço a partir de um CEP que o cliente informar.',
+    url: 'https://viacep.com.br/ws/{cep}/json/',
+    method: 'GET',
+    headers: [] as { key: string; value: string }[],
+    schema: { type: 'object', required: ['cep'], properties: { cep: { type: 'string', description: 'CEP só com números, ex.: 01001000' } } },
+    bodyTemplate: '',
+    kind: 'responding' as const,
+  },
+  {
+    name: 'registrar_atendimento',
+    description: 'Registra que um novo atendimento começou. Corpo FIXO — o agente não preenche nada, só dispara.',
+    url: 'https://httpbin.org/post',
+    method: 'POST',
+    headers: [{ key: 'X-Origem', value: 'vendly' }],
+    schema: {},
+    bodyTemplate: '{"tipo":"novo_atendimento","origem":"whatsapp"}',
+    kind: 'responding' as const,
+  },
+  {
+    name: 'enviar_para_fluxo',
+    description: 'Envia o nome do cliente e um resumo do pedido para um fluxo externo. Corpo MISTO — o agente preenche nome e mensagem.',
+    url: 'https://httpbin.org/post',
+    method: 'POST',
+    headers: [{ key: 'X-Origem', value: 'vendly' }],
+    schema: { type: 'object', required: ['nome', 'mensagem'], properties: {
+      nome: { type: 'string', description: 'Nome do cliente' },
+      mensagem: { type: 'string', description: 'Resumo do que o cliente quer' },
+    } },
+    bodyTemplate: '{"nome":"{nome}","mensagem":"{mensagem}"}',
+    kind: 'responding' as const,
+  },
+];
+
+apiRouter.post('/admin/seed-integrations', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { email, agentId, replace } = req.body as { email?: string; agentId?: string; replace?: boolean };
+    const db = await getDb();
+
+    const filter: Record<string, unknown> = {};
+    if (agentId) filter._id = agentId;
+    if (email) {
+      const tenant = await db.collection('tenants').findOne({ email });
+      if (!tenant) { res.status(404).json({ error: `tenant not found for ${email}` }); return; }
+      filter.tenantId = tenant._id;
+    }
+
+    const agents = await db.collection('agents').find(filter).toArray();
+    if (agents.length === 0) { res.status(404).json({ error: 'no agents matched' }); return; }
+
+    const updated: Array<{ agentId: string; name: string; integrations: number }> = [];
+    for (const a of agents) {
+      const existing = replace ? [] : (Array.isArray(a.customApis) ? a.customApis as Array<{ name: string }> : []);
+      const have = new Set(existing.map(c => c.name));
+      const merged = [...existing, ...EXAMPLE_INTEGRATIONS.filter(e => !have.has(e.name))];
+      await db.collection('agents').updateOne(
+        { _id: a._id } as Record<string, unknown>,
+        { $set: { customApis: merged, updatedAt: new Date() } },
+      );
+      updated.push({ agentId: String(a._id), name: String(a.name ?? ''), integrations: merged.length });
+    }
+
+    res.json({ ok: true, seeded: EXAMPLE_INTEGRATIONS.map(e => e.name), agents: updated });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // ── Admin: reset all tenant data (no JWT needed — admin key only) ─────────────
 apiRouter.post('/admin/reset', requireAuth, requireAdmin, async (_req, res) => {
   try {
