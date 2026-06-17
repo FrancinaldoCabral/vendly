@@ -47,22 +47,170 @@ const KIND_OPTS = [
   { value: 'async', label: 'Demorada — o agente avisa "estou verificando" e responde quando o resultado chega' },
 ];
 
+// ── Friendly fields table (generates JSON Schema + body template under the hood) ──
+
+type FieldRow = { name: string; source: 'fixed' | 'agent'; type: 'text' | 'number' | 'bool'; value: string; description: string; required: boolean };
+
+function jsonToFieldType(t?: string): FieldRow['type'] {
+  return t === 'number' || t === 'integer' ? 'number' : t === 'boolean' ? 'bool' : 'text';
+}
+
+/** Build the JSON Schema (agent-decided fields) + body template from the friendly table. */
+function buildFromFields(fields: FieldRow[], method: string): { schema: Record<string, unknown>; bodyTemplate: string } {
+  const props: Record<string, unknown> = {};
+  const required: string[] = [];
+  const parts: string[] = [];
+  for (const f of fields) {
+    const name = f.name.trim();
+    if (!name) continue;
+    const jt = f.type === 'number' ? 'number' : f.type === 'bool' ? 'boolean' : 'string';
+    if (f.source === 'agent') {
+      props[name] = f.description ? { type: jt, description: f.description } : { type: jt };
+      if (f.required) required.push(name);
+      parts.push(jt === 'string' ? `${JSON.stringify(name)}:"{${name}}"` : `${JSON.stringify(name)}:{${name}}`);
+    } else {
+      const lit = f.type === 'number' ? String(Number(f.value) || 0)
+        : f.type === 'bool' ? (/^(true|sim|1|yes)$/i.test(f.value.trim()) ? 'true' : 'false')
+        : JSON.stringify(f.value ?? '');
+      parts.push(`${JSON.stringify(name)}:${lit}`);
+    }
+  }
+  const schema = Object.keys(props).length
+    ? { type: 'object', properties: props, ...(required.length ? { required } : {}) }
+    : {};
+  const noBody = method === 'GET' || method === 'HEAD';
+  const bodyTemplate = (!noBody && parts.length) ? `{${parts.join(',')}}` : '';
+  return { schema, bodyTemplate };
+}
+
+/** Reverse: turn a stored integration into table rows. Returns null if too advanced (nested JSON). */
+function parseToFields(api: { schema?: Record<string, unknown>; bodyTemplate?: string }): FieldRow[] | null {
+  const schema = (api.schema ?? {}) as { properties?: Record<string, { type?: string; description?: string }>; required?: string[] };
+  const props = schema.properties ?? {};
+  const required = new Set(schema.required ?? []);
+  const fields: FieldRow[] = [];
+  const seen = new Set<string>();
+
+  const tpl = (api.bodyTemplate ?? '').trim();
+  if (tpl) {
+    let obj: Record<string, unknown>;
+    try {
+      // Replace {p} placeholders with safe markers so the template parses as JSON.
+      const s = tpl.replace(/"\{(\w+)\}"/g, '"__PHS_$1__"').replace(/\{(\w+)\}/g, '"__PHN_$1__"');
+      obj = JSON.parse(s) as Record<string, unknown>;
+    } catch { return null; }
+    for (const [k, v] of Object.entries(obj)) {
+      if (v !== null && typeof v === 'object') return null; // nested → keep advanced mode
+      const m = typeof v === 'string' ? /^__PH[SN]_(\w+)__$/.exec(v) : null;
+      if (m) {
+        const pname = m[1];
+        const sp = props[pname] || props[k];
+        fields.push({ name: k, source: 'agent', type: jsonToFieldType(sp?.type), value: '', description: sp?.description ?? '', required: required.has(pname) || required.has(k) });
+        seen.add(pname); seen.add(k);
+      } else {
+        const type: FieldRow['type'] = typeof v === 'number' ? 'number' : typeof v === 'boolean' ? 'bool' : 'text';
+        fields.push({ name: k, source: 'fixed', type, value: typeof v === 'string' ? v : String(v), description: '', required: false });
+        seen.add(k);
+      }
+    }
+  }
+  // Schema params not present in the body (e.g. values used only in the URL) → agent fields.
+  for (const [k, sp] of Object.entries(props)) {
+    if (seen.has(k)) continue;
+    fields.push({ name: k, source: 'agent', type: jsonToFieldType(sp?.type), value: '', description: sp?.description ?? '', required: required.has(k) });
+  }
+  return fields;
+}
+
+/** Agent-decided fields derived from a schema only (used when the body is too advanced to parse). */
+function fieldsFromSchema(schema?: Record<string, unknown>): FieldRow[] {
+  const s = (schema ?? {}) as { properties?: Record<string, { type?: string; description?: string }>; required?: string[] };
+  const required = new Set(s.required ?? []);
+  return Object.entries(s.properties ?? {}).map(([k, sp]) => ({
+    name: k, source: 'agent' as const, type: jsonToFieldType(sp?.type), value: '', description: sp?.description ?? '', required: required.has(k),
+  }));
+}
+
+function FieldsEditor({ fields, onChange, method }: { fields: FieldRow[]; onChange: (f: FieldRow[]) => void; method: string }) {
+  const set = (i: number, patch: Partial<FieldRow>) => onChange(fields.map((f, idx) => idx === i ? { ...f, ...patch } : f));
+  const add = () => onChange([...fields, { name: '', source: 'agent', type: 'text', value: '', description: '', required: true }]);
+  const remove = (i: number) => onChange(fields.filter((_, idx) => idx !== i));
+  const isGet = method === 'GET' || method === 'HEAD';
+  return (
+    <div>
+      {fields.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Nenhum dado ainda. Adicione os campos que essa integração envia (ou use {'{campo}'} direto na URL).</Text>}
+      {fields.map((f, i) => (
+        <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          <Input size="small" style={{ width: 130 }} placeholder="campo" value={f.name} onChange={e => set(i, { name: e.target.value })} />
+          <Select size="small" style={{ width: 140 }} value={f.source}
+            onChange={(v: 'fixed' | 'agent') => set(i, { source: v })}
+            options={[{ value: 'agent', label: 'O agente decide' }, { value: 'fixed', label: 'Valor fixo' }]} />
+          <Select size="small" style={{ width: 92 }} value={f.type}
+            onChange={(v: FieldRow['type']) => set(i, { type: v })}
+            options={[{ value: 'text', label: 'Texto' }, { value: 'number', label: 'Número' }, { value: 'bool', label: 'Sim/Não' }]} />
+          {f.source === 'fixed'
+            ? <Input size="small" style={{ flex: 1, minWidth: 130 }} placeholder="valor a enviar" value={f.value} onChange={e => set(i, { value: e.target.value })} />
+            : <Input size="small" style={{ flex: 1, minWidth: 130 }} placeholder="o que o agente preenche" value={f.description} onChange={e => set(i, { description: e.target.value })} />}
+          {f.source === 'agent' && (
+            <span title="Obrigatório">obrig. <Switch size="small" checked={f.required} onChange={c => set(i, { required: c })} /></span>
+          )}
+          <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => remove(i)} />
+        </div>
+      ))}
+      <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={add}>Adicionar campo</Button>
+      {isGet && fields.some(f => f.source === 'fixed') && (
+        <div><Text type="warning" style={{ fontSize: 11 }}>Em chamadas GET não há corpo: valores fixos não são enviados — coloque-os direto na URL. Campos "o agente decide" entram na URL via {'{campo}'}.</Text></div>
+      )}
+    </div>
+  );
+}
+
 function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (apis: CustomApi[]) => void }) {
   const [editIdx, setEditIdx] = useState<number | null>(null);
+  const [fields, setFields] = useState<FieldRow[]>([]);
+  // The SCHEMA is always generated from the fields table. Only the BODY can optionally be
+  // hand-written as a JSON template with {masks} (for shapes the table can't express).
+  const [bodyManual, setBodyManual] = useState(false);
   const [form] = Form.useForm();
 
-  const openNew = () => { form.resetFields(); form.setFieldsValue({ method: 'GET', kind: 'responding', schema: '{}', headers: [], bodyTemplate: '' }); setEditIdx(-1); };
+  const openNew = () => {
+    form.resetFields();
+    form.setFieldsValue({ method: 'GET', kind: 'responding', headers: [], bodyTemplate: '' });
+    setFields([]); setBodyManual(false); setEditIdx(-1);
+  };
   const openEdit = (i: number) => {
     const a = apis[i];
-    form.setFieldsValue({ ...a, kind: a.kind ?? 'responding', schema: JSON.stringify(a.schema ?? {}, null, 2) });
+    form.setFieldsValue({
+      name: a.name, description: a.description, url: a.url, method: a.method ?? 'GET',
+      kind: a.kind ?? 'responding', waitingMessage: a.waitingMessage, headers: a.headers ?? [],
+      bodyTemplate: a.bodyTemplate ?? '',
+    });
+    const parsed = parseToFields(a);
+    if (parsed) { setFields(parsed); setBodyManual(false); }
+    else { setFields(fieldsFromSchema(a.schema)); setBodyManual(true); } // body too advanced → keep it manual
     setEditIdx(i);
   };
   const remove = (i: number) => onChange(apis.filter((_, idx) => idx !== i));
+
+  const setManual = (on: boolean) => {
+    if (on) {
+      // Seed the textarea with the auto-generated body so the user starts from something valid.
+      const cur = String(form.getFieldValue('bodyTemplate') ?? '');
+      if (!cur.trim()) form.setFieldsValue({ bodyTemplate: buildFromFields(fields, String(form.getFieldValue('method') ?? 'GET')).bodyTemplate });
+    }
+    setBodyManual(on);
+  };
+
   const save = () => {
     form.validateFields().then(vals => {
-      let schema: Record<string, unknown> = {};
-      try { schema = JSON.parse(String(vals.schema ?? '{}')); } catch { /* ignore */ }
-      const api_: CustomApi = { ...vals, schema, headers: vals.headers ?? [] };
+      // Schema is ALWAYS generated from the fields table — the user never writes it.
+      const built = buildFromFields(fields, String(vals.method));
+      const bodyTemplate = bodyManual ? String(vals.bodyTemplate ?? '') : built.bodyTemplate;
+      const api_: CustomApi = {
+        name: vals.name, description: vals.description, url: vals.url, method: vals.method,
+        kind: vals.kind, waitingMessage: vals.waitingMessage,
+        headers: vals.headers ?? [], schema: built.schema, bodyTemplate,
+      };
       if (editIdx === -1) onChange([...apis, api_]);
       else onChange(apis.map((a, i) => i === editIdx ? api_ : a));
       setEditIdx(null);
@@ -129,15 +277,25 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
             <Select options={['GET', 'POST', 'PUT', 'DELETE'].map(m => ({ value: m, label: m }))} />
           </Form.Item>
 
+          <Form.Item label="Dados que a integração envia"
+            extra="Liste cada dado e quem preenche. Marque “O agente decide” para a IA preencher na hora, ou “Valor fixo” para um valor sempre igual. A plataforma monta tudo — você não escreve JSON.">
+            <FieldsEditor fields={fields} onChange={setFields} method={method ?? 'GET'} />
+          </Form.Item>
+
           {hasBody && (
-            <Form.Item name="bodyTemplate" label="Corpo da requisição (body)"
-              extra={<span>
-                Como o corpo é montado:<br />
-                • <b>Fixo</b>: escreva o JSON pronto — o agente não decide nada. Ex.: <code>{'{"tipo":"aviso","ativo":true}'}</code><br />
-                • <b>Misto</b>: use <code>{'{campo}'}</code> onde o agente preenche, e defina esses campos no quadro abaixo. Ex.: <code>{'{"telefone":"{fone}","texto":"{msg}"}'}</code><br />
-                • <b>Agente decide tudo</b>: deixe em branco e defina os parâmetros abaixo.
-              </span>}>
-              <TextArea rows={3} style={{ fontFamily: 'monospace', fontSize: 12 }} placeholder='{"telefone":"{fone}","texto":"{msg}"}' />
+            <Form.Item label={
+              <span>
+                Corpo manual (avançado)
+                <Switch size="small" style={{ marginLeft: 8 }} checked={bodyManual} onChange={setManual} />
+              </span>}
+              extra={bodyManual
+                ? <span>Escreva o corpo em JSON; use <code>{'{campo}'}</code> para os campos “o agente decide” da tabela acima. O schema continua sendo gerado pela tabela.</span>
+                : 'Ative só se precisar de um corpo que a tabela não expressa (ex.: JSON aninhado).'}>
+              {bodyManual
+                ? <Form.Item name="bodyTemplate" noStyle>
+                    <TextArea rows={4} style={{ fontFamily: 'monospace', fontSize: 12 }} placeholder='{"cliente":{"nome":"{nome}"},"itens":["{item}"]}' />
+                  </Form.Item>
+                : <Text type="secondary" style={{ fontSize: 12 }}>Corpo montado automaticamente pela tabela acima.</Text>}
             </Form.Item>
           )}
 
@@ -162,11 +320,6 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
               </Form.Item>
             )}
           </Form.List>
-
-          <Form.Item name="schema" label="Campos que o agente decide (avançado, JSON Schema)"
-            extra="Defina aqui os campos que o agente preenche (os mesmos nomes usados em {campo} na URL ou no corpo). Deixe {} se o corpo é fixo ou se não há parâmetros.">
-            <TextArea rows={3} style={{ fontFamily: 'monospace', fontSize: 12 }} placeholder='{"type":"object","properties":{"numero":{"type":"string"}},"required":["numero"]}' />
-          </Form.Item>
         </Form>
       </Modal>
     </div>
