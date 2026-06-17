@@ -36,6 +36,15 @@ export interface CustomApi {
   headers?: { key: string; value: string }[];
   schema: Record<string, unknown>;
   /**
+   * Optional request body template (sent for non-GET methods). Supports {placeholders}
+   * filled from the LLM args. Drives the three payload modes:
+   *  - empty + empty schema → no body (pure trigger);
+   *  - filled with no placeholders → fully STATIC body (LLM decides nothing);
+   *  - filled with {placeholders} + schema → MIXED (static fields + LLM-filled fields);
+   *  - empty + schema defined → the LLM decides the whole body.
+   */
+  bodyTemplate?: string;
+  /**
    * How the tool behaves:
    *  - 'responding' (default): the LLM waits for the result and composes the reply.
    *  - 'void': the agent runs it and just confirms to the contact (no payload back to the LLM).
@@ -283,24 +292,39 @@ async function executeCustomApi(api: CustomApi, args: Record<string, unknown>): 
   const method = api.method.toUpperCase();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   for (const h of api.headers ?? []) {
-    headers[h.key] = h.value;
+    if (h.key) headers[h.key] = h.value;
   }
-  let url = api.url;
-  // Replace {param} placeholders in URL with arg values
-  for (const [k, v] of Object.entries(args)) {
-    url = url.replace(`{${k}}`, encodeURIComponent(String(v)));
+
+  // Replace {param} placeholders in the URL (path/query-safe encoding); leave unknowns intact.
+  const url = api.url.replace(/\{(\w+)\}/g, (m, k) => (k in args ? encodeURIComponent(String(args[k])) : m));
+
+  // Body modes (non-GET): static template, mixed template, or full LLM args.
+  let body: string | undefined;
+  if (method !== 'GET' && method !== 'HEAD') {
+    const tpl = (api.bodyTemplate ?? '').trim();
+    if (tpl) {
+      // Fill {param} with JSON-safe values so a template like {"qtd":{qtd},"nome":"{nome}"} stays valid.
+      body = tpl.replace(/\{(\w+)\}/g, (m, k) => {
+        if (!(k in args)) return m;
+        const v = args[k];
+        return typeof v === 'number' || typeof v === 'boolean' ? String(v) : JSON.stringify(String(v)).slice(1, -1);
+      });
+    } else if (Object.keys(args).length > 0) {
+      body = JSON.stringify(args); // LLM decides the whole body
+    }
+    // else: no schema and no template → pure trigger, no body
   }
+
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 15_000);
   try {
-    const r = await fetch(url, {
-      method,
-      headers,
-      body: method !== 'GET' ? JSON.stringify(args) : undefined,
-      signal: ctrl.signal,
-    });
+    const r = await fetch(url, { method, headers, body, signal: ctrl.signal });
     const text = await r.text();
+    console.log(`[agent-loop]   api=${api.name} ${method} ${url} → ${r.status} (${text.length}b)`);
     return r.ok ? text : `❌ HTTP ${r.status}: ${text.slice(0, 300)}`;
+  } catch (e) {
+    console.error(`[agent-loop]   api=${api.name} ${method} ${url} FETCH_ERROR:`, String(e));
+    return `❌ Falha ao chamar ${api.name}: ${String(e)}`;
   } finally {
     clearTimeout(t);
   }

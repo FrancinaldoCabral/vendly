@@ -15,6 +15,7 @@ export interface CustomApi {
   method: 'GET' | 'POST' | 'PUT' | 'DELETE';
   headers?: { key: string; value: string }[];
   schema: Record<string, unknown>;
+  bodyTemplate?: string;
   kind?: 'responding' | 'void' | 'async';
   waitingMessage?: string;
 }

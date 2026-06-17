@@ -51,7 +51,7 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
   const [editIdx, setEditIdx] = useState<number | null>(null);
   const [form] = Form.useForm();
 
-  const openNew = () => { form.resetFields(); form.setFieldsValue({ method: 'GET', kind: 'responding', schema: '{}', headers: [] }); setEditIdx(-1); };
+  const openNew = () => { form.resetFields(); form.setFieldsValue({ method: 'GET', kind: 'responding', schema: '{}', headers: [], bodyTemplate: '' }); setEditIdx(-1); };
   const openEdit = (i: number) => {
     const a = apis[i];
     form.setFieldsValue({ ...a, kind: a.kind ?? 'responding', schema: JSON.stringify(a.schema ?? {}, null, 2) });
@@ -70,6 +70,8 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
   };
 
   const kind = Form.useWatch('kind', form);
+  const method = Form.useWatch('method', form);
+  const hasBody = method && method !== 'GET';
 
   return (
     <div>
@@ -127,6 +129,18 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
             <Select options={['GET', 'POST', 'PUT', 'DELETE'].map(m => ({ value: m, label: m }))} />
           </Form.Item>
 
+          {hasBody && (
+            <Form.Item name="bodyTemplate" label="Corpo da requisição (body)"
+              extra={<span>
+                Como o corpo é montado:<br />
+                • <b>Fixo</b>: escreva o JSON pronto — o agente não decide nada. Ex.: <code>{'{"tipo":"aviso","ativo":true}'}</code><br />
+                • <b>Misto</b>: use <code>{'{campo}'}</code> onde o agente preenche, e defina esses campos no quadro abaixo. Ex.: <code>{'{"telefone":"{fone}","texto":"{msg}"}'}</code><br />
+                • <b>Agente decide tudo</b>: deixe em branco e defina os parâmetros abaixo.
+              </span>}>
+              <TextArea rows={3} style={{ fontFamily: 'monospace', fontSize: 12 }} placeholder='{"telefone":"{fone}","texto":"{msg}"}' />
+            </Form.Item>
+          )}
+
           <Form.List name="headers">
             {(fields, { add, remove }) => (
               <Form.Item label="Cabeçalhos / autenticação (headers)"
@@ -149,8 +163,8 @@ function CustomApiEditor({ apis, onChange }: { apis: CustomApi[]; onChange: (api
             )}
           </Form.List>
 
-          <Form.Item name="schema" label="Parâmetros que o agente preenche (avançado, JSON Schema)"
-            extra="O que o agente envia no corpo/URL da requisição. Deixe {} se não precisa de parâmetros.">
+          <Form.Item name="schema" label="Campos que o agente decide (avançado, JSON Schema)"
+            extra="Defina aqui os campos que o agente preenche (os mesmos nomes usados em {campo} na URL ou no corpo). Deixe {} se o corpo é fixo ou se não há parâmetros.">
             <TextArea rows={3} style={{ fontFamily: 'monospace', fontSize: 12 }} placeholder='{"type":"object","properties":{"numero":{"type":"string"}},"required":["numero"]}' />
           </Form.Item>
         </Form>
