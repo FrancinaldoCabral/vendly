@@ -58,7 +58,7 @@ export interface CustomApi {
 
 /** Per-agent content the actions draw from (never invented by the LLM). Everything is labeled. */
 export interface AgentAssets {
-  menus?: { label: string; intro?: string; options: string[] }[];
+  menus?: { label: string; intro?: string; options: string[]; buttonText?: string }[];
   reactions?: { label: string; emoji: string }[];
   stickers?: { label: string; url: string }[];
   labels?: { label: string }[]; // CRM conversation labels
@@ -197,7 +197,7 @@ function buildCatalogCall(
   ctx: { instance: string; contactJid?: string; senderPhone: string; lastMessageId?: string; recentMessages?: { id: string; text: string }[] },
   args: Record<string, unknown>,
   assets: AgentAssets | undefined,
-): { name: string; payload: Record<string, unknown> } | { error: string } {
+): { name: string; payload: Record<string, unknown>; fallback?: { name: string; payload: Record<string, unknown> } } | { error: string } {
   const instanceName = ctx.instance;
   const number = ctx.contactJid || ctx.senderPhone; // destination = current contact ONLY
   if (!number) return { error: 'sem destinatário' };
@@ -208,10 +208,21 @@ function buildCatalogCall(
       if (!menu) return { error: `menu "${String(args.menu)}" não cadastrado` };
       const opcoes = (menu.options ?? []).map(String).filter(Boolean);
       if (opcoes.length < 2) return { error: `menu "${menu.label}" precisa de 2+ opções` };
-      // A numbered text menu — the most reliable cross-context "pick an option" UX.
+      const intro = menu.intro?.trim() || menu.label;
+      // Native WhatsApp interactive list. Each option becomes a selectable row; when the
+      // client taps one, WhatsApp sends its text back as a normal message the agent reads.
+      const sections = [{
+        title: menu.label,
+        rows: opcoes.map((o, i) => ({ title: o, rowId: String(i + 1) })),
+      }];
+      // Fallback to a numbered text message if the WhatsApp client/Evolution can't render a list.
       const numbered = opcoes.map((o, i) => `${i + 1}. ${o}`);
-      const text = [menu.intro?.trim(), ...numbered].filter(Boolean).join('\n');
-      return { name: 'evolution_send_text', payload: { instanceName, number, text } };
+      const text = [intro, ...numbered].join('\n');
+      return {
+        name: 'evolution_send_list',
+        payload: { instanceName, number, title: menu.label, description: intro, buttonText: menu.buttonText || 'Ver opções', footerText: '', sections },
+        fallback: { name: 'evolution_send_text', payload: { instanceName, number, text } },
+      };
     }
     case 'acao_reagir': {
       const sel = String(args.reacao ?? '');
@@ -601,7 +612,11 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
             content = `Não foi possível executar "${label}": ${built.error}. Avise o cliente com naturalidade.`;
           } else {
             console.log(`[agent-loop]   action=${toolName} → ${built.name} payload=${JSON.stringify(built.payload).slice(0, 200)}`);
-            const raw = await routeBuiltinTool(built.name, built.payload);
+            let raw = await routeBuiltinTool(built.name, built.payload);
+            if (raw.startsWith('❌') && built.fallback) {
+              console.warn(`[agent-loop]   action=${toolName} primary ${built.name} failed → fallback ${built.fallback.name}`);
+              raw = await routeBuiltinTool(built.fallback.name, built.fallback.payload);
+            }
             content = raw.startsWith('❌')
               ? `A ação "${label}" falhou. Avise o cliente com gentileza, sem detalhes técnicos.`
               : `Ação "${label}" realizada com sucesso. Confirme ao cliente de forma natural e curta.`;

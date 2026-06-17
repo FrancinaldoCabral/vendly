@@ -192,6 +192,23 @@ export const evolutionTools: Tool[] = [
     },
   },
   {
+    name: 'evolution_send_list',
+    description: 'Envia uma lista interativa do WhatsApp (botão que abre opções selecionáveis).',
+    inputSchema: {
+      type: 'object',
+      required: ['instanceName', 'number', 'buttonText', 'sections'],
+      properties: {
+        instanceName: { type: 'string' },
+        number: { type: 'string' },
+        title: { type: 'string' },
+        description: { type: 'string' },
+        buttonText: { type: 'string' },
+        footerText: { type: 'string' },
+        sections: { type: 'array', items: { type: 'object' } },
+      },
+    },
+  },
+  {
     name: 'evolution_send_status',
     description: 'Publica um status/story no WhatsApp (texto, imagem ou áudio). Para posts agendados.',
     inputSchema: {
@@ -386,6 +403,21 @@ export async function handleEvolutionTool(name: string, args: Args): Promise<str
       const payload: Record<string, unknown> = { number, name, selectableCount, values, delay: delay ?? 0 };
       const res = await safeRequest(() =>
         http.post(`/message/sendPoll/${instanceName}`, payload).then(r => r.data)
+      );
+      return toText(res);
+    }
+    case 'evolution_send_list': {
+      const { instanceName, number, title, description, buttonText, footerText, sections } = args;
+      const payload: Record<string, unknown> = {
+        number,
+        title: title ?? '',
+        description: description ?? '',
+        buttonText: buttonText ?? 'Ver opções',
+        footerText: footerText ?? '',
+        sections: sections ?? [],
+      };
+      const res = await safeRequest(() =>
+        http.post(`/message/sendList/${instanceName}`, payload).then(r => r.data)
       );
       return toText(res);
     }
