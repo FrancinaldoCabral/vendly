@@ -182,11 +182,14 @@ apiRouter.post('/admin/diag-chatwoot', requireAuth, requireAdmin, async (_req, r
 // ── Admin: full state diagnostic for a tenant ─────────────────────────────────
 apiRouter.get('/admin/tenant-state', requireAuth, requireAdmin, async (req, res) => {
   const email = req.query.email as string | undefined;
-  if (!email) { res.status(400).json({ error: 'email query param required' }); return; }
+  const tenantId = req.query.tenantId as string | undefined;
+  if (!email && !tenantId) { res.status(400).json({ error: 'email or tenantId query param required' }); return; }
 
   try {
     const db = await getDb();
-    const tenant = await db.collection('tenants').findOne({ email });
+    const tenant = tenantId
+      ? await db.collection('tenants').findOne({ _id: tenantId } as Record<string, unknown>)
+      : await db.collection('tenants').findOne({ email });
     if (!tenant) { res.status(404).json({ error: 'Tenant not found' }); return; }
 
     const agents = await db.collection('agents').find({ tenantId: tenant._id }).toArray();
