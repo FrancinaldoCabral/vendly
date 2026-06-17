@@ -58,7 +58,7 @@ export interface CustomApi {
 
 /** Per-agent content the actions draw from (never invented by the LLM). Everything is labeled. */
 export interface AgentAssets {
-  menus?: { label: string; intro?: string; options: string[]; buttonText?: string }[];
+  menus?: { label: string; intro?: string; options: string[]; buttonText?: string; footerText?: string }[];
   reactions?: { label: string; emoji: string }[];
   stickers?: { label: string; url: string }[];
   labels?: { label: string }[]; // CRM conversation labels
@@ -222,7 +222,7 @@ function buildCatalogCall(
       }];
       return {
         name: 'evolution_send_list',
-        payload: { instanceName, number, title: menu.label, description: intro, buttonText: menu.buttonText || 'Ver opções', sections },
+        payload: { instanceName, number, title: menu.label, description: intro, buttonText: menu.buttonText || 'Ver opções', footerText: menu.footerText?.trim() || ' ', sections },
       };
     }
     case 'acao_reagir': {

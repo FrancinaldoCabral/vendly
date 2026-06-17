@@ -72,7 +72,7 @@ interface AgentDoc {
   tools?: string[];
   builtinTools?: string[];
   assets?: {
-    menus?: Array<{ label: string; intro?: string; options: string[]; buttonText?: string }>;
+    menus?: Array<{ label: string; intro?: string; options: string[]; buttonText?: string; footerText?: string }>;
     reactions?: Array<{ label: string; emoji: string }>;
     stickers?: Array<{ label: string; url: string }>;
     labels?: Array<{ label: string }>;

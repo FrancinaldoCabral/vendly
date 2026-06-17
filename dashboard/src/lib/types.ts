@@ -37,7 +37,7 @@ export interface ContactFilter {
 }
 
 export interface AgentAssets {
-  menus?: { label: string; intro?: string; options: string[]; buttonText?: string }[];
+  menus?: { label: string; intro?: string; options: string[]; buttonText?: string; footerText?: string }[];
   reactions?: { label: string; emoji: string }[];
   stickers?: { label: string; url: string }[];
   labels?: { label: string }[];

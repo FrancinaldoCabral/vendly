@@ -379,13 +379,16 @@ function AssetEditor({ kind, assets, onChange }: { kind: AssetKind; assets: Agen
               <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => upd(menus.filter((_, idx) => idx !== i))} />
             </div>
             <Input size="small" placeholder="Texto de introdução (ex.: Para qual horário prefere?)" value={m.intro ?? ''} onChange={e => set(i, 'intro', e.target.value)} style={{ marginBottom: 6 }} />
-            <Input size="small" placeholder="Texto do botão (ex.: Ver horários) — padrão: Ver opções" value={m.buttonText ?? ''} onChange={e => set(i, 'buttonText', e.target.value)} style={{ marginBottom: 6 }} />
+            <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+              <Input size="small" placeholder="Texto do botão (padrão: Ver opções)" value={m.buttonText ?? ''} onChange={e => set(i, 'buttonText', e.target.value)} />
+              <Input size="small" placeholder="Rodapé (opcional)" value={m.footerText ?? ''} onChange={e => set(i, 'footerText', e.target.value)} />
+            </div>
             <Select mode="tags" size="small" style={{ width: '100%' }} value={m.options ?? []} onChange={(v: string[]) => set(i, 'options', v)}
               placeholder="Opções (digite cada uma e tecle Enter)" tokenSeparators={[',']} open={false} />
             <Text type="secondary" style={{ fontSize: 11 }}>Vai como lista interativa do WhatsApp (botão que abre as opções). Se o aparelho do cliente não suportar, cai automaticamente para uma lista em texto.</Text>
           </div>
         ))}
-        <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => upd([...menus, { label: '', intro: '', options: [], buttonText: '' }])}>Adicionar menu</Button>
+        <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={() => upd([...menus, { label: '', intro: '', options: [], buttonText: '', footerText: '' }])}>Adicionar menu</Button>
       </div>
     );
   }

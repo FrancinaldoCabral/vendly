@@ -408,16 +408,17 @@ export async function handleEvolutionTool(name: string, args: Args): Promise<str
     }
     case 'evolution_send_list': {
       const { instanceName, number, title, description, buttonText, footerText, sections } = args;
-      // Evolution's schema enforces minLength:1 on optional string fields when present,
-      // so only include footerText if it's non-empty (an empty string is rejected).
+      // This Evolution build REQUIRES footerText and rejects empty strings (minLength:1),
+      // so always send a non-empty value.
+      const footer = footerText && String(footerText).trim() ? String(footerText) : ' ';
       const payload: Record<string, unknown> = {
         number,
         title: title ?? '',
         description: description ?? '',
         buttonText: buttonText ?? 'Ver opções',
+        footerText: footer,
         sections: sections ?? [],
       };
-      if (footerText) payload.footerText = footerText;
       const res = await safeRequest(() =>
         http.post(`/message/sendList/${instanceName}`, payload).then(r => r.data)
       );
