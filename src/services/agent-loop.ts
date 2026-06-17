@@ -208,22 +208,14 @@ function buildCatalogCall(
       if (!menu) return { error: `menu "${String(args.menu)}" não cadastrado` };
       const opcoes = (menu.options ?? []).map(String).filter(Boolean);
       if (opcoes.length < 2) return { error: `menu "${menu.label}" precisa de 2+ opções` };
+      // Native WhatsApp interactive lists are broken on Evolution v2.3.7 (Baileys
+      // "this.isZero is not a function" — see evolution-api issues #2305/#2390), so we
+      // send a numbered TEXT menu, which works on any version. The client replies in
+      // natural language and the agent (with full history) interprets the choice.
       const intro = menu.intro?.trim() || menu.label;
-      // Native WhatsApp interactive list. Each option becomes a selectable row; when the
-      // client taps one, WhatsApp sends its text back as a normal message the agent reads.
-      // WhatsApp limits row titles to ~24 chars; when longer, keep the full text in description.
-      const sections = [{
-        title: menu.label.slice(0, 24),
-        rows: opcoes.map((o, i) => {
-          const row: { title: string; rowId: string; description?: string } = { title: o.slice(0, 24), rowId: String(i + 1) };
-          if (o.length > 24) row.description = o.slice(0, 72);
-          return row;
-        }),
-      }];
-      return {
-        name: 'evolution_send_list',
-        payload: { instanceName, number, title: menu.label, description: intro, buttonText: menu.buttonText || 'Ver opções', footerText: menu.footerText?.trim() || ' ', sections },
-      };
+      const numbered = opcoes.map((o, i) => `${i + 1}. ${o}`);
+      const text = [intro, ...numbered].join('\n');
+      return { name: 'evolution_send_text', payload: { instanceName, number, text } };
     }
     case 'acao_reagir': {
       const sel = String(args.reacao ?? '');
