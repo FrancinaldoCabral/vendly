@@ -381,10 +381,11 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   // Falls back to text chunks if TTS fails.
   const cleanContent = content.replace(/\[ESCALAR_HUMANO\]/g, '').trim();
   let sentAsAudio = false;
+  let audioSourceId: string | null = null;
   if (replyInAudio && cleanContent) {
     const tts = await generateTts(cleanContent);
     if (tts) {
-      await sendEvolutionAudio(instance, contactJid, tts.base64);
+      audioSourceId = await sendEvolutionAudio(instance, contactJid, tts.base64);
       sentAsAudio = true;
       console.log(`[debounce] replied with audio agent=${agentId} conv=${conversationId}`);
     }
@@ -399,12 +400,15 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   }
 
   // Mirror the bot's OUTGOING reply to Chatwoot (incoming was already mirrored earlier).
-  // source_id makes Chatwoot treat it as already-delivered → no "Failed to send", no re-delivery.
+  // source_id makes Chatwoot treat it as already-delivered → no "Failed to send", and (crucially)
+  // it stops Chatwoot from re-delivering the message back to WhatsApp via the chatwoot-out webhook.
+  // For an audio reply we mirror the transcript as TEXT so the human team can read it, but it MUST
+  // carry a source_id — otherwise it would be re-sent to the customer as a duplicate text message.
   const resolvedConvId = cwConvId;
   if (resolvedConvId && cwAccountId && cwApiKey) {
     const outgoing = sentAsAudio
-      ? [{ text: cleanContent, sourceId: null as string | null }]
-      : chunks.map((c, i) => ({ text: c, sourceId: sentIds[i] ?? null }));
+      ? [{ text: cleanContent, sourceId: audioSourceId ?? `audio-${Date.now()}` }]
+      : chunks.map((c, i) => ({ text: c, sourceId: sentIds[i] ?? `text-${Date.now()}-${i}` }));
     for (const out of outgoing) {
       if (out.text?.trim()) await postChatwootMessage(cwAccountId, cwApiKey, resolvedConvId, 'outgoing', out.text, out.sourceId, []);
     }
@@ -681,17 +685,20 @@ async function sendEvolutionText(instance: string, jid: string, text: string): P
   }
 }
 
-/** Send a base64 audio payload as a WhatsApp voice note (PTT). */
-async function sendEvolutionAudio(instance: string, jid: string, base64: string): Promise<void> {
+/** Send a base64 audio payload as a WhatsApp voice note (PTT). Returns the WA message id. */
+async function sendEvolutionAudio(instance: string, jid: string, base64: string): Promise<string | null> {
   const url = `${config.evolution.url}/message/sendWhatsAppAudio/${instance}`;
   try {
-    await fetch(url, {
+    const r = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'apikey': config.evolution.apiKey },
       body: JSON.stringify({ number: jid, audio: base64 }),
     });
+    const data = await r.json().catch(() => null) as { key?: { id?: string } } | null;
+    return data?.key?.id ?? null;
   } catch (e) {
     console.error(`[debounce] Evolution sendWhatsAppAudio failed:`, String(e));
+    return null;
   }
 }
 
