@@ -210,6 +210,15 @@ async function handleChatwootHandoff(subjectId: string, payload: ChatwootPayload
   const owner = routeAgent(candidates, contactJid, senderPhone) ?? candidates[0];
   const tenantId = owner.tenantId;
 
+  // The account-level webhook fires for EVERY conversation in the account. If the tenant has
+  // more than one connection/inbox, ignore events whose inbox doesn't belong to this subject's
+  // agents — otherwise we'd pause/resume an agent on the wrong number.
+  const convInboxId = conv.inbox_id ?? payload.inbox_id;
+  if (convInboxId && owner.chatwootInboxId && owner.chatwootInboxId !== convInboxId) {
+    console.log(`[handoff] inbox_id mismatch subjectId=${subjectId} expected=${owner.chatwootInboxId} got=${convInboxId} — skipping`);
+    return;
+  }
+
   // Is a human currently assigned?
   const assigneeId = conv.assignee_id ?? conv.meta?.assignee?.id ?? payload.assignee_id ?? payload.meta?.assignee?.id ?? null;
   const assigned = !!conv.assignee || !!conv.meta?.assignee || !!payload.assignee || !!payload.meta?.assignee || !!assigneeId;

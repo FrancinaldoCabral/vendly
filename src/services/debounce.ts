@@ -77,6 +77,20 @@ REGRA CRÍTICA — NUNCA FINJA UMA AÇÃO:
   return CAPABILITIES_MEDIA + actionsBlock + antiHallucination;
 }
 
+// ── In-process keyed mutex ───────────────────────────────────────────────────
+// Serializes async work sharing a key within this Node process. Used to stop
+// concurrent webhooks from creating duplicate Chatwoot contacts/conversations.
+const keyedLocks = new Map<string, Promise<void>>();
+function withKeyedLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = keyedLocks.get(key) ?? Promise.resolve();
+  const run = prev.then(fn, fn); // run fn after prev settles (success or failure)
+  const gate = run.then(() => {}, () => {});
+  keyedLocks.set(key, gate);
+  // Drop the entry once the chain drains so the map doesn't grow unbounded.
+  gate.finally(() => { if (keyedLocks.get(key) === gate) keyedLocks.delete(key); });
+  return run;
+}
+
 // ── In-memory timer map ──────────────────────────────────────────────────────
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -713,22 +727,37 @@ export async function resolveOrCreateConversation(
   senderPhone: string, senderName: string, contactJid: string,
 ): Promise<number | null> {
   if (!accountId || !apiKey || !inboxId) return null;
+  const bare = senderPhone.replace(/\D/g, '');
+  // Serialize per (account,inbox,contact): a brand-new contact's first burst of messages
+  // arrives as concurrent webhooks, each trying to create the same contact/conversation.
+  // Without this lock Chatwoot would reject the duplicate phone (422) and/or spawn duplicate
+  // conversations. The lock makes the first call create and the rest find.
+  const lockKey = `cwres:${accountId}:${inboxId}:${bare || contactJid}`;
+  return withKeyedLock(lockKey, () => doResolveOrCreateConversation(accountId, apiKey, inboxId, senderPhone, senderName, contactJid));
+}
+
+async function doResolveOrCreateConversation(
+  accountId: string, apiKey: string, inboxId: number,
+  senderPhone: string, senderName: string, contactJid: string,
+): Promise<number | null> {
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
   const h = { 'Content-Type': 'application/json', 'api_access_token': apiKey };
   const bare = senderPhone.replace(/\D/g, '');
   const phone = bare ? `+${bare}` : '';
+
+  const searchContact = async (): Promise<number | null> => {
+    if (!bare) return null;
+    const sr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(bare)}&page=1`, { headers: h });
+    if (!sr.ok) return null;
+    const d = await sr.json() as { payload?: Array<{ id: number; phone_number?: string }> };
+    return (d.payload ?? []).find(c => {
+      const p = (c.phone_number ?? '').replace(/\D/g, '');
+      return p && (p.endsWith(bare) || bare.endsWith(p));
+    })?.id ?? null;
+  };
+
   try {
-    let contactId: number | null = null;
-    if (bare) {
-      const sr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(bare)}&page=1`, { headers: h });
-      if (sr.ok) {
-        const d = await sr.json() as { payload?: Array<{ id: number; phone_number?: string }> };
-        contactId = (d.payload ?? []).find(c => {
-          const p = (c.phone_number ?? '').replace(/\D/g, '');
-          return p && (p.endsWith(bare) || bare.endsWith(p));
-        })?.id ?? null;
-      }
-    }
+    let contactId = await searchContact();
     if (!contactId) {
       const cr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts`, {
         method: 'POST', headers: h,
@@ -737,6 +766,10 @@ export async function resolveOrCreateConversation(
       if (cr.ok) {
         const c = await cr.json() as { payload?: { contact?: { id?: number } }; id?: number };
         contactId = c.payload?.contact?.id ?? c.id ?? null;
+      } else {
+        // Phone/identifier already taken (concurrent create or prior contact) → re-search.
+        console.warn(`[mirror] contact create ${cr.status} — re-searching`);
+        contactId = await searchContact();
       }
     }
     if (!contactId) { console.warn('[mirror] could not find/create contact'); return null; }
