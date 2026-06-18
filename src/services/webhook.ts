@@ -9,7 +9,7 @@
 import type { Router, Request, Response } from 'express';
 import { getRedis } from '../tools/redis.js';
 import { getDb } from '../tools/mongodb.js';
-import { scheduleDebounce } from './debounce.js';
+import { scheduleDebounce, resolveOrCreateConversation, postChatwootMessage } from './debounce.js';
 import { groupFilter, type GroupConfig } from './group-filter.js';
 import { getAgentPhone } from './agent-loop.js';
 import {
@@ -383,8 +383,8 @@ export async function handleEvolutionMessageWebhook(
   // Load ALL agents listening on this connection, in priority order (then age).
   const agents = (await db.collection('agents').find(
     { evolutionInstance: instance } as Record<string, unknown>,
-    { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, groupConfig: 1, status: 1 } },
-  ).toArray()) as unknown as Array<RoutableAgent & { status?: string }>;
+    { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, groupConfig: 1, status: 1, chatwootInboxId: 1 } },
+  ).toArray()) as unknown as Array<RoutableAgent & { status?: string; chatwootInboxId?: number }>;
   // Only active/pending agents participate; sort by priority asc, stable by id.
   const ordered = agents
     .filter(a => a.status !== 'paused')
@@ -395,6 +395,11 @@ export async function handleEvolutionMessageWebhook(
     return;
   }
   const tenantId = ordered[0].tenantId;
+
+  // Chatwoot creds (for instant incoming mirroring — no debounce delay).
+  const tenantDoc = await db.collection('tenants').findOne({ _id: tenantId } as Record<string, unknown>) as { chatwoot?: { accountId: number; apiKey: string } } | null;
+  const cwAccountId = tenantDoc?.chatwoot?.accountId?.toString() ?? '';
+  const cwApiKey = tenantDoc?.chatwoot?.apiKey ?? '';
 
   for (const msg of rawMsgs) {
     const key = (msg.key ?? {}) as Record<string, unknown>;
@@ -535,6 +540,17 @@ export async function handleEvolutionMessageWebhook(
     await redis.expire(recentKey, 60 * 60 * 24);
 
     console.log(`[ev-webhook] buffered agent=${agentId} tenant=${tenantId} jid=${jid} kind=${mediaKind ?? (userSentAudio ? 'audio' : 'text')} text="${text.slice(0, 60)}"`);
+
+    // ── Instant CRM mirror: post the customer's message to Chatwoot NOW (no debounce delay). ──
+    if (owner.chatwootInboxId && cwAccountId && cwApiKey && (text || mediaBase64)) {
+      try {
+        const cid = await resolveOrCreateConversation(cwAccountId, cwApiKey, owner.chatwootInboxId, senderPhone, pushName || senderPhone || 'Usuário', jid);
+        if (cid) {
+          const media = mediaBase64 ? [{ base64: mediaBase64, mimetype: mediaMimetype ?? 'application/octet-stream', fileName: mediaFileName }] : [];
+          await postChatwootMessage(cwAccountId, cwApiKey, cid, 'incoming', text, msgId, media);
+        }
+      } catch (e) { console.error('[ev-webhook] instant mirror failed:', String(e)); }
+    }
 
     scheduleDebounce(agentId, `ev:${convKey}`, tenantId);
   }

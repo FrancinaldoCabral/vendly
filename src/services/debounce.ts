@@ -197,18 +197,15 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   // Media attached to this turn (downloaded by the webhook).
   const mediaEntries = entries.filter(e => e.mediaBase64 && e.mediaKind);
 
-  // ── Mirror the INCOMING message to Chatwoot ALWAYS — even if the bot is paused (human
-  // takeover) or will skip. Otherwise the team can't see customer messages they need to handle.
+  // Incoming messages are mirrored to Chatwoot INSTANTLY by the Evolution webhook (not here),
+  // so the CRM has no debounce delay. We just resolve the conversation id for the outgoing
+  // mirror + labels/escalation below.
   let cwConvId: number | null = chatwootConvId ?? null;
-  if (agentDoc.chatwootInboxId && cwAccountId && cwApiKey) {
+  if (!cwConvId && agentDoc.chatwootInboxId && cwAccountId && cwApiKey) {
     cwConvId = await resolveOrCreateConversation(cwAccountId, cwApiKey, agentDoc.chatwootInboxId, senderPhone, senderName, contactJid);
-    if (cwConvId && (consolidatedText || mediaEntries.length)) {
-      const incomingMedia = mediaEntries.map(m => ({ base64: m.mediaBase64!, mimetype: m.mediaMimetype ?? 'application/octet-stream', fileName: m.mediaFileName }));
-      await postChatwootMessage(cwAccountId, cwApiKey, cwConvId, 'incoming', consolidatedText, lastEntry.messageId ?? null, incomingMedia);
-    }
   }
 
-  // ── Bot gating (incoming is already mirrored above) ──
+  // ── Bot gating (incoming is mirrored by the webhook regardless of this) ──
   // Human takeover: a human is handling this contact → the bot stays silent.
   const takenOver = (await redis.get(activeTakeoverKey)) || (activeTakeoverKey !== takeoverKey ? await redis.get(takeoverKey) : null);
   if (takenOver) {
@@ -673,7 +670,7 @@ async function escalateToHuman(
  * Find (or create) the open Chatwoot conversation for a contact in our inbox. Read/create only —
  * no messages. Used to mirror incoming messages even when the bot is paused.
  */
-async function resolveOrCreateConversation(
+export async function resolveOrCreateConversation(
   accountId: string, apiKey: string, inboxId: number,
   senderPhone: string, senderName: string, contactJid: string,
 ): Promise<number | null> {
@@ -733,7 +730,7 @@ async function resolveOrCreateConversation(
  * (no "Failed to send") and never re-delivers. Media (incoming) is uploaded as attachments,
  * best-effort — a media failure falls back to posting the text only.
  */
-async function postChatwootMessage(
+export async function postChatwootMessage(
   accountId: string, apiKey: string, conversationId: number,
   messageType: 'incoming' | 'outgoing', text: string, sourceId: string | null,
   media: Array<{ base64: string; mimetype: string; fileName?: string }>,
