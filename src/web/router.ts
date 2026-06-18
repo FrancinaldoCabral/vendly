@@ -378,8 +378,10 @@ apiRouter.post('/admin/migrate-chatwoot', requireAuth, requireAdmin, async (req,
     // 2. Reset account webhooks: drop ours, recreate with conversation (handoff) events only.
     const wr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/webhooks`, { headers: cwHeaders });
     if (wr.ok) {
-      const wd = await wr.json() as { payload?: Array<{ id: number; url: string }> };
-      for (const h of wd.payload ?? []) {
+      const wd = await wr.json() as { payload?: { webhooks?: Array<{ id: number; url: string }> } | Array<{ id: number; url: string }>; webhooks?: Array<{ id: number; url: string }> };
+      const hooks = Array.isArray(wd.payload) ? wd.payload
+        : ((wd.payload as { webhooks?: Array<{ id: number; url: string }> })?.webhooks ?? wd.webhooks ?? []);
+      for (const h of hooks) {
         if (String(h.url).includes('/webhook/chatwoot/')) {
           await fetch(`${cwUrl}/api/v1/accounts/${accountId}/webhooks/${h.id}`, { method: 'DELETE', headers: cwHeaders });
         }
