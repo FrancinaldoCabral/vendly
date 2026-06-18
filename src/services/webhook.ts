@@ -233,6 +233,23 @@ async function handleChatwootHandoff(subjectId: string, payload: ChatwootPayload
   } else {
     await redis.del(key);
     console.log(`[handoff] RESUME bot agent=${owner._id} conv=${convId} jid=${jid} (assigned=${assigned} resolved=${resolved})`);
+    // On resolve, also UNASSIGN the conversation (set to "none") so it's clean for next time —
+    // assignment is the single source of truth for handoff (you asked for exactly this).
+    if (resolved && assigned) {
+      try {
+        const db = await getDb();
+        const t = await db.collection('tenants').findOne({ _id: tenantId } as Record<string, unknown>) as { chatwoot?: { accountId: number; apiKey: string } } | null;
+        if (t?.chatwoot?.accountId && t.chatwoot.apiKey) {
+          const cwUrl = (process.env.CHATWOOT_URL ?? '').replace(/\/$/, '');
+          const r = await fetch(`${cwUrl}/api/v1/accounts/${t.chatwoot.accountId}/conversations/${convId}/assignments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'api_access_token': t.chatwoot.apiKey },
+            body: JSON.stringify({ assignee_id: null }),
+          });
+          console.log(`[handoff] unassign-on-resolve conv=${convId}: ${r.status}`);
+        }
+      } catch (e) { console.warn('[handoff] unassign-on-resolve failed:', String(e)); }
+    }
   }
 }
 

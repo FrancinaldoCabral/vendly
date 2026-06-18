@@ -119,13 +119,6 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   const sessionKey = `sessao:t:${tenantId}:${agentId}:${conversationId}`;
   const takeoverKey = `human_takeover:t:${tenantId}:${agentId}:${conversationId}`;
 
-  // Initial takeover check using conversationId key (fast reject before reading buffer)
-  const takeover = await redis.get(takeoverKey);
-  if (takeover) {
-    console.log(`[debounce] SKIP: human_takeover active agent=${agentId} conv=${conversationId}`);
-    return;
-  }
-
   // Pop all buffered messages
   const rawMessages: string[] = [];
   let msg: string | null;
@@ -188,33 +181,43 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   const activeSessionKey = sessionScope ? `sessao:t:${tenantId}:${agentId}:${sessionScope}` : sessionKey;
   const activeTakeoverKey = jidKey ? `human_takeover:t:${tenantId}:${agentId}:${jidKey}` : takeoverKey;
 
-  // Second takeover check using JID key (covers human takeover from Chatwoot path)
-  if (jidKey && activeTakeoverKey !== takeoverKey) {
-    const jidTakeover = await redis.get(activeTakeoverKey);
-    if (jidTakeover) {
-      console.log(`[debounce] SKIP: human_takeover active (jid) agent=${agentId} jid=${contactJid}`);
-      return;
-    }
-  }
-
-  // Load agent config + tenant Chatwoot credentials
+  // Load agent config + tenant Chatwoot credentials (needed before mirroring).
   const db = await getDb();
   const agentDoc = await db.collection<AgentDoc>('agents').findOne({ _id: agentId, tenantId })
     ?? await db.collection<AgentDoc>('agents').findOne({ tenantId, evolutionInstance: { $exists: true } });
-
-  const tenantDoc = await db.collection<TenantDoc>('tenants').findOne({ _id: tenantId });
-  const cwAccountId = tenantDoc?.chatwoot?.accountId?.toString() ?? agentDoc?.chatwootAccountId ?? '';
-  const cwApiKey = tenantDoc?.chatwoot?.apiKey ?? '';
-
   if (!agentDoc) {
     console.error(`[debounce] Agent not found: agentId=${agentId} tenantId=${tenantId}`);
     return;
   }
-
+  const tenantDoc = await db.collection<TenantDoc>('tenants').findOne({ _id: tenantId });
+  const cwAccountId = tenantDoc?.chatwoot?.accountId?.toString() ?? agentDoc.chatwootAccountId ?? '';
+  const cwApiKey = tenantDoc?.chatwoot?.apiKey ?? '';
   const instance = agentDoc.evolutionInstance;
 
+  // Media attached to this turn (downloaded by the webhook).
+  const mediaEntries = entries.filter(e => e.mediaBase64 && e.mediaKind);
+
+  // ── Mirror the INCOMING message to Chatwoot ALWAYS — even if the bot is paused (human
+  // takeover) or will skip. Otherwise the team can't see customer messages they need to handle.
+  let cwConvId: number | null = chatwootConvId ?? null;
+  if (agentDoc.chatwootInboxId && cwAccountId && cwApiKey) {
+    cwConvId = await resolveOrCreateConversation(cwAccountId, cwApiKey, agentDoc.chatwootInboxId, senderPhone, senderName, contactJid);
+    if (cwConvId && (consolidatedText || mediaEntries.length)) {
+      const incomingMedia = mediaEntries.map(m => ({ base64: m.mediaBase64!, mimetype: m.mediaMimetype ?? 'application/octet-stream', fileName: m.mediaFileName }));
+      await postChatwootMessage(cwAccountId, cwApiKey, cwConvId, 'incoming', consolidatedText, lastEntry.messageId ?? null, incomingMedia);
+    }
+  }
+
+  // ── Bot gating (incoming is already mirrored above) ──
+  // Human takeover: a human is handling this contact → the bot stays silent.
+  const takenOver = (await redis.get(activeTakeoverKey)) || (activeTakeoverKey !== takeoverKey ? await redis.get(takeoverKey) : null);
+  if (takenOver) {
+    console.log(`[debounce] bot paused (human takeover) agent=${agentId} jid=${contactJid}`);
+    return;
+  }
+
   // Group filter (only applies to @g.us JIDs)
-  if (contactJid.endsWith('@g.us') && agentDoc.groupConfig) {
+  if (isGroupConv && agentDoc.groupConfig) {
     const filterResult = groupFilter({
       jid: contactJid,
       messageText: consolidatedText,
@@ -255,7 +258,6 @@ export async function processBuffer(agentId: string, conversationId: string, ten
 
   // Build user content (text + any attached media as multimodal parts)
   let userContent: unknown;
-  const mediaEntries = entries.filter(e => e.mediaBase64 && e.mediaKind);
   if (mediaEntries.length > 0 || (lastEntry.mediaUrl && lastEntry.mediaType)) {
     const parts: unknown[] = [];
     if (consolidatedText) parts.push({ type: 'text', text: consolidatedText });
@@ -347,23 +349,16 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     if (i < chunks.length - 1) await sleep(700);
   }
 
-  // Mirror to Chatwoot ourselves (we own the inbox; Evolution's native integration is off).
-  // source_id makes Chatwoot treat messages as already-delivered → no "Failed to send" and no
-  // re-delivery loop. Incoming media is uploaded as attachments (best-effort, never fatal).
-  let resolvedConvId: number | null = chatwootConvId ?? null;
-  if (agentDoc.chatwootInboxId && cwAccountId && cwApiKey) {
-    const incomingMedia = mediaEntries
-      .filter(m => m.mediaBase64)
-      .map(m => ({ base64: m.mediaBase64!, mimetype: m.mediaMimetype ?? 'application/octet-stream', fileName: m.mediaFileName }));
+  // Mirror the bot's OUTGOING reply to Chatwoot (incoming was already mirrored earlier).
+  // source_id makes Chatwoot treat it as already-delivered → no "Failed to send", no re-delivery.
+  const resolvedConvId = cwConvId;
+  if (resolvedConvId && cwAccountId && cwApiKey) {
     const outgoing = sentAsAudio
       ? [{ text: cleanContent, sourceId: null as string | null }]
       : chunks.map((c, i) => ({ text: c, sourceId: sentIds[i] ?? null }));
-    resolvedConvId = await mirrorToChatwoot({
-      accountId: cwAccountId, apiKey: cwApiKey, inboxId: agentDoc.chatwootInboxId,
-      senderPhone, senderName, contactJid,
-      incomingText: consolidatedText, incomingSourceId: lastMessageId ?? null, incomingMedia,
-      outgoing,
-    });
+    for (const out of outgoing) {
+      if (out.text?.trim()) await postChatwootMessage(cwAccountId, cwApiKey, resolvedConvId, 'outgoing', out.text, out.sourceId, []);
+    }
   }
 
   // Apply CRM labels the agent chose (ensure they exist, then merge onto the conversation).
@@ -675,31 +670,22 @@ async function escalateToHuman(
 }
 
 /**
- * Mirror a WhatsApp exchange into Chatwoot (we own the inbox; Evolution integration is off).
- * Finds/creates the contact + open conversation, posts the incoming message (with media
- * attachments) and the bot's outgoing reply, each tagged with source_id so Chatwoot marks
- * them delivered (no "Failed to send") and never re-delivers. Returns the conversation id.
+ * Find (or create) the open Chatwoot conversation for a contact in our inbox. Read/create only —
+ * no messages. Used to mirror incoming messages even when the bot is paused.
  */
-interface MirrorOpts {
-  accountId: string; apiKey: string; inboxId: number;
-  senderPhone: string; senderName: string; contactJid: string;
-  incomingText: string; incomingSourceId: string | null;
-  incomingMedia: Array<{ base64: string; mimetype: string; fileName?: string }>;
-  outgoing: Array<{ text: string; sourceId: string | null }>;
-}
-
-async function mirrorToChatwoot(o: MirrorOpts): Promise<number | null> {
-  const { accountId, apiKey, inboxId } = o;
+async function resolveOrCreateConversation(
+  accountId: string, apiKey: string, inboxId: number,
+  senderPhone: string, senderName: string, contactJid: string,
+): Promise<number | null> {
   if (!accountId || !apiKey || !inboxId) return null;
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
-  const jsonHeaders = { 'Content-Type': 'application/json', 'api_access_token': apiKey };
-  const bare = o.senderPhone.replace(/\D/g, '');
+  const h = { 'Content-Type': 'application/json', 'api_access_token': apiKey };
+  const bare = senderPhone.replace(/\D/g, '');
   const phone = bare ? `+${bare}` : '';
   try {
-    // 1. Find or create the contact.
     let contactId: number | null = null;
     if (bare) {
-      const sr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(bare)}&page=1`, { headers: jsonHeaders });
+      const sr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts/search?q=${encodeURIComponent(bare)}&page=1`, { headers: h });
       if (sr.ok) {
         const d = await sr.json() as { payload?: Array<{ id: number; phone_number?: string }> };
         contactId = (d.payload ?? []).find(c => {
@@ -710,8 +696,8 @@ async function mirrorToChatwoot(o: MirrorOpts): Promise<number | null> {
     }
     if (!contactId) {
       const cr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts`, {
-        method: 'POST', headers: jsonHeaders,
-        body: JSON.stringify({ inbox_id: inboxId, name: o.senderName || phone || 'Contato', phone_number: phone || undefined, identifier: o.contactJid || bare || undefined }),
+        method: 'POST', headers: h,
+        body: JSON.stringify({ inbox_id: inboxId, name: senderName || phone || 'Contato', phone_number: phone || undefined, identifier: contactJid || bare || undefined }),
       });
       if (cr.ok) {
         const c = await cr.json() as { payload?: { contact?: { id?: number } }; id?: number };
@@ -720,9 +706,8 @@ async function mirrorToChatwoot(o: MirrorOpts): Promise<number | null> {
     }
     if (!contactId) { console.warn('[mirror] could not find/create contact'); return null; }
 
-    // 2. Find or create an open conversation in our inbox.
     let convId: number | null = null;
-    const lc = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts/${contactId}/conversations`, { headers: jsonHeaders });
+    const lc = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/contacts/${contactId}/conversations`, { headers: h });
     if (lc.ok) {
       const d = await lc.json() as { payload?: Array<{ id: number; inbox_id: number; status: string }> };
       const convs = d.payload ?? [];
@@ -730,49 +715,57 @@ async function mirrorToChatwoot(o: MirrorOpts): Promise<number | null> {
     }
     if (!convId) {
       const cc = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/conversations`, {
-        method: 'POST', headers: jsonHeaders,
-        body: JSON.stringify({ inbox_id: inboxId, contact_id: contactId, status: 'open', source_id: o.contactJid || bare }),
+        method: 'POST', headers: h,
+        body: JSON.stringify({ inbox_id: inboxId, contact_id: contactId, status: 'open', source_id: contactJid || bare }),
       });
       if (cc.ok) { const c = await cc.json() as { id?: number }; convId = c.id ?? null; }
     }
-    if (!convId) { console.warn('[mirror] could not find/create conversation'); return null; }
-
-    const msgUrl = `${cwUrl}/api/v1/accounts/${accountId}/conversations/${convId}/messages`;
-
-    // 3. Incoming message (+ media as attachments, best-effort).
-    if (o.incomingMedia.length > 0) {
-      try {
-        const fd = new FormData();
-        if (o.incomingText) fd.append('content', o.incomingText);
-        fd.append('message_type', 'incoming');
-        if (o.incomingSourceId) fd.append('source_id', o.incomingSourceId);
-        for (const m of o.incomingMedia) {
-          fd.append('attachments[]', new Blob([Buffer.from(m.base64, 'base64')], { type: m.mimetype }), m.fileName || `arquivo`);
-        }
-        const r = await fetch(msgUrl, { method: 'POST', headers: { 'api_access_token': apiKey }, body: fd });
-        if (!r.ok) console.warn(`[mirror] incoming media post ${r.status}: ${(await r.text()).slice(0, 150)}`);
-      } catch (e) {
-        console.warn('[mirror] incoming media upload failed, posting text only:', String(e));
-        if (o.incomingText) await fetch(msgUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ content: o.incomingText, message_type: 'incoming', source_id: o.incomingSourceId ?? undefined }) });
-      }
-    } else if (o.incomingText) {
-      await fetch(msgUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ content: o.incomingText, message_type: 'incoming', source_id: o.incomingSourceId ?? undefined }) });
-    }
-
-    // 4. Outgoing bot reply (one message per chunk), tagged with source_id.
-    for (const out of o.outgoing) {
-      if (!out.text?.trim()) continue;
-      await fetch(msgUrl, {
-        method: 'POST', headers: jsonHeaders,
-        body: JSON.stringify({ content: out.text, message_type: 'outgoing', source_id: out.sourceId ?? undefined }),
-      });
-    }
-
-    console.log(`[mirror] ok contact=${contactId} conv=${convId} media=${o.incomingMedia.length} out=${o.outgoing.length}`);
+    if (!convId) console.warn('[mirror] could not find/create conversation');
     return convId;
   } catch (e) {
-    console.error('[mirror] failed:', String(e));
+    console.error('[mirror] resolveOrCreateConversation failed:', String(e));
     return null;
+  }
+}
+
+/**
+ * Post one message into a Chatwoot conversation, with source_id so Chatwoot marks it delivered
+ * (no "Failed to send") and never re-delivers. Media (incoming) is uploaded as attachments,
+ * best-effort — a media failure falls back to posting the text only.
+ */
+async function postChatwootMessage(
+  accountId: string, apiKey: string, conversationId: number,
+  messageType: 'incoming' | 'outgoing', text: string, sourceId: string | null,
+  media: Array<{ base64: string; mimetype: string; fileName?: string }>,
+): Promise<void> {
+  if (!accountId || !apiKey || !conversationId) return;
+  const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+  const msgUrl = `${cwUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
+  const jsonHeaders = { 'Content-Type': 'application/json', 'api_access_token': apiKey };
+  try {
+    if (media.length > 0) {
+      try {
+        const fd = new FormData();
+        if (text) fd.append('content', text);
+        fd.append('message_type', messageType);
+        if (sourceId) fd.append('source_id', sourceId);
+        for (const m of media) fd.append('attachments[]', new Blob([Buffer.from(m.base64, 'base64')], { type: m.mimetype }), m.fileName || 'arquivo');
+        const r = await fetch(msgUrl, { method: 'POST', headers: { 'api_access_token': apiKey }, body: fd });
+        if (!r.ok) {
+          console.warn(`[mirror] ${messageType} media post ${r.status}: ${(await r.text()).slice(0, 150)}`);
+          if (text) await fetch(msgUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ content: text, message_type: messageType, source_id: sourceId ?? undefined }) });
+        }
+        return;
+      } catch (e) {
+        console.warn('[mirror] media upload failed, text only:', String(e));
+      }
+    }
+    if (text) {
+      const r = await fetch(msgUrl, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ content: text, message_type: messageType, source_id: sourceId ?? undefined }) });
+      if (!r.ok) console.warn(`[mirror] ${messageType} post ${r.status}: ${(await r.text()).slice(0, 120)}`);
+    }
+  } catch (e) {
+    console.error('[mirror] postChatwootMessage failed:', String(e));
   }
 }
 
