@@ -9,7 +9,7 @@
 import type { Router, Request, Response } from 'express';
 import { getRedis } from '../tools/redis.js';
 import { getDb } from '../tools/mongodb.js';
-import { scheduleDebounce, resolveOrCreateConversation, postChatwootMessage } from './debounce.js';
+import { scheduleDebounce, resolveOrCreateConversation, postChatwootMessage, postChatwootNote } from './debounce.js';
 import { groupFilter, type GroupConfig } from './group-filter.js';
 import { getAgentPhone } from './agent-loop.js';
 import {
@@ -485,6 +485,11 @@ export async function handleEvolutionMessageWebhook(
     let mediaKind: string | undefined;
     let mediaFileName: string | undefined;
     let userSentAudio = false;
+    // Audio is kept SEPARATE from mediaBase64: the transcript feeds the LLM, but we still want
+    // the actual voice note mirrored to Chatwoot as a playable attachment (not text-only).
+    let audioB64: string | undefined;
+    let audioMime: string | undefined;
+    let audioTranscript = '';
 
     const media = classifyEvolutionMedia(message);
     if (media) {
@@ -493,8 +498,10 @@ export async function handleEvolutionMessageWebhook(
         userSentAudio = true;
         const fetched = await fetchEvolutionMediaBase64(instance, msg);
         if (fetched) {
-          const transcript = await transcribeAudio(fetched.base64, fetched.mimetype ?? media.mimetype);
-          text = [text, transcript].filter(Boolean).join('\n') || '[Áudio sem fala reconhecível]';
+          audioB64 = fetched.base64;
+          audioMime = fetched.mimetype ?? media.mimetype;
+          audioTranscript = await transcribeAudio(fetched.base64, audioMime);
+          text = [text, audioTranscript].filter(Boolean).join('\n') || '[Áudio sem fala reconhecível]';
         } else {
           text = text || '[Áudio recebido]';
         }
@@ -551,12 +558,19 @@ export async function handleEvolutionMessageWebhook(
     console.log(`[ev-webhook] buffered agent=${agentId} tenant=${tenantId} jid=${jid} kind=${mediaKind ?? (userSentAudio ? 'audio' : 'text')} text="${text.slice(0, 60)}"`);
 
     // ── Instant CRM mirror: post the customer's message to Chatwoot NOW (no debounce delay). ──
-    if (owner.chatwootInboxId && cwAccountId && cwApiKey && (text || mediaBase64)) {
+    if (owner.chatwootInboxId && cwAccountId && cwApiKey && (text || mediaBase64 || audioB64)) {
       try {
         const cid = await resolveOrCreateConversation(cwAccountId, cwApiKey, owner.chatwootInboxId, senderPhone, pushName || senderPhone || 'Usuário', jid);
         if (cid) {
-          const media = mediaBase64 ? [{ base64: mediaBase64, mimetype: mediaMimetype ?? 'application/octet-stream', fileName: mediaFileName }] : [];
-          await postChatwootMessage(cwAccountId, cwApiKey, cid, 'incoming', text, msgId, media);
+          if (audioB64) {
+            // Mirror the real voice note (playable) + the transcript as a private note.
+            const ext = (audioMime ?? '').includes('mpeg') ? 'mp3' : (audioMime ?? '').includes('wav') ? 'wav' : 'ogg';
+            await postChatwootMessage(cwAccountId, cwApiKey, cid, 'incoming', '', msgId, [{ base64: audioB64, mimetype: audioMime ?? 'audio/ogg', fileName: `audio.${ext}` }]);
+            if (audioTranscript.trim()) await postChatwootNote(cwAccountId, cwApiKey, cid, `🗣️ Transcrição do áudio do cliente:\n${audioTranscript}`);
+          } else {
+            const media = mediaBase64 ? [{ base64: mediaBase64, mimetype: mediaMimetype ?? 'application/octet-stream', fileName: mediaFileName }] : [];
+            await postChatwootMessage(cwAccountId, cwApiKey, cid, 'incoming', text, msgId, media);
+          }
         }
       } catch (e) { console.error('[ev-webhook] instant mirror failed:', String(e)); }
     }

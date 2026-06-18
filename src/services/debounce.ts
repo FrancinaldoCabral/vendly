@@ -382,10 +382,12 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   const cleanContent = content.replace(/\[ESCALAR_HUMANO\]/g, '').trim();
   let sentAsAudio = false;
   let audioSourceId: string | null = null;
+  let audioMirror: { base64: string; mimetype: string } | null = null;
   if (replyInAudio && cleanContent) {
     const tts = await generateTts(cleanContent);
     if (tts) {
       audioSourceId = await sendEvolutionAudio(instance, contactJid, tts.base64);
+      audioMirror = { base64: tts.base64, mimetype: tts.mimetype };
       sentAsAudio = true;
       console.log(`[debounce] replied with audio agent=${agentId} conv=${conversationId}`);
     }
@@ -406,11 +408,22 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   // carry a source_id — otherwise it would be re-sent to the customer as a duplicate text message.
   const resolvedConvId = cwConvId;
   if (resolvedConvId && cwAccountId && cwApiKey) {
-    const outgoing = sentAsAudio
-      ? [{ text: cleanContent, sourceId: audioSourceId ?? `audio-${Date.now()}` }]
-      : chunks.map((c, i) => ({ text: c, sourceId: sentIds[i] ?? `text-${Date.now()}-${i}` }));
-    for (const out of outgoing) {
-      if (out.text?.trim()) await postChatwootMessage(cwAccountId, cwApiKey, resolvedConvId, 'outgoing', out.text, out.sourceId, []);
+    if (sentAsAudio) {
+      // Show the actual voice note in the CRM (playable), not a text version. The transcript
+      // goes in a private note so the human team can still read/search it.
+      const sid = audioSourceId ?? `audio-${Date.now()}`;
+      if (audioMirror) {
+        const ext = audioMirror.mimetype.includes('wav') ? 'wav' : audioMirror.mimetype.includes('mpeg') ? 'mp3' : 'ogg';
+        await postChatwootMessage(cwAccountId, cwApiKey, resolvedConvId, 'outgoing', '', sid, [{ base64: audioMirror.base64, mimetype: audioMirror.mimetype, fileName: `audio.${ext}` }]);
+        await postChatwootNote(cwAccountId, cwApiKey, resolvedConvId, `🗣️ Transcrição do áudio enviado pelo agente:\n${cleanContent}`);
+      } else {
+        // TTS bytes unavailable — fall back to the transcript so the team still sees the reply.
+        await postChatwootMessage(cwAccountId, cwApiKey, resolvedConvId, 'outgoing', cleanContent, sid, []);
+      }
+    } else {
+      for (let i = 0; i < chunks.length; i++) {
+        if (chunks[i]?.trim()) await postChatwootMessage(cwAccountId, cwApiKey, resolvedConvId, 'outgoing', chunks[i], sentIds[i] ?? `text-${Date.now()}-${i}`, []);
+      }
     }
   }
 
@@ -841,6 +854,27 @@ export async function postChatwootMessage(
     }
   } catch (e) {
     console.error('[mirror] postChatwootMessage failed:', String(e));
+  }
+}
+
+/**
+ * Post a PRIVATE note (internal, not delivered to the customer) into a conversation. We use it to
+ * attach the transcript of a voice message so the human team can read/search it, while the actual
+ * audio shows up as a normal playable attachment.
+ */
+export async function postChatwootNote(accountId: string, apiKey: string, conversationId: number, text: string): Promise<void> {
+  if (!accountId || !apiKey || !conversationId || !text?.trim()) return;
+  const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+  const msgUrl = `${cwUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/messages`;
+  try {
+    const r = await fetch(msgUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'api_access_token': apiKey },
+      body: JSON.stringify({ content: text, message_type: 'outgoing', private: true }),
+    });
+    if (!r.ok) console.warn(`[mirror] note post ${r.status}: ${(await r.text()).slice(0, 120)}`);
+  } catch (e) {
+    console.error('[mirror] postChatwootNote failed:', String(e));
   }
 }
 
