@@ -367,7 +367,7 @@ apiRouter.post('/admin/migrate-chatwoot', requireAuth, requireAdmin, async (req,
       const instance = a.evolutionInstance; const inboxId = a.chatwootInboxId;
       if (!instance || !inboxId || seen.has(`${instance}:${inboxId}`)) continue;
       seen.add(`${instance}:${inboxId}`);
-      await disableEvolutionChatwoot(instance);
+      await disableEvolutionChatwoot(instance, accountId, apiKey);
       const channelWebhook = `${config.app.url}/webhook/chatwoot-out/${instance}`;
       const pr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}`, {
         method: 'PATCH', headers: cwHeaders, body: JSON.stringify({ channel: { webhook_url: channelWebhook } }),

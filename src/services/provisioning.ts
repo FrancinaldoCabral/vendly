@@ -657,14 +657,28 @@ export async function createChatwootAccount(
   }
 }
 
-/** Disable Evolution's native Chatwoot integration for an instance (we own the mirroring). */
-export async function disableEvolutionChatwoot(instance: string): Promise<void> {
+/**
+ * Disable Evolution's native Chatwoot integration for an instance (we own the mirroring).
+ * Evolution IGNORES enabled:false if the other fields are empty, so we must resend the REAL
+ * account/token/url with enabled:false to actually flip it off.
+ */
+export async function disableEvolutionChatwoot(instance: string, accountId?: number | string, token?: string): Promise<void> {
   const evUrl = config.evolution.url.replace(/\/$/, '');
   try {
     const r = await fetch(`${evUrl}/chatwoot/set/${instance}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
-      body: JSON.stringify({ enabled: false, accountId: '', token: '', url: '', signMsg: false, nameInbox: '', autoCreate: false }),
+      body: JSON.stringify({
+        enabled: false,
+        accountId: accountId !== undefined ? String(accountId) : '',
+        token: token ?? '',
+        url: config.chatwoot.url,
+        nameInbox: '',
+        signMsg: false,
+        reopenConversation: true,
+        conversationPending: false,
+        autoCreate: false,
+      }),
     });
     console.log(`[provisioning] Evolution chatwoot disable ${instance}: ${r.status}`);
   } catch (e) {
@@ -699,7 +713,7 @@ async function createChatwootInbox(
     console.log(`[provisioning] Chatwoot inbox create ${instance}: status=${r.status} body=${body.slice(0, 250)}`);
     if (r.ok) {
       const inbox = JSON.parse(body) as { id?: number };
-      await disableEvolutionChatwoot(instance);
+      await disableEvolutionChatwoot(instance, cwAccountId, cwApiKey);
       await registerChatwootWebhook(cwAccountId, cwApiKey, accountWebhook);
       if (inbox.id) {
         console.log(`[provisioning] Chatwoot inbox created (owned): id=${inbox.id} name=${name}`);

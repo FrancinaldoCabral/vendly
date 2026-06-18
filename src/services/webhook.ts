@@ -213,8 +213,11 @@ async function handleChatwootHandoff(subjectId: string, payload: ChatwootPayload
   // Is a human currently assigned?
   const assigneeId = conv.assignee_id ?? conv.meta?.assignee?.id ?? payload.assignee_id ?? payload.meta?.assignee?.id ?? null;
   const assigned = !!conv.assignee || !!conv.meta?.assignee || !!payload.assignee || !!payload.meta?.assignee || !!assigneeId;
-  const resolved = (conv.status ?? payload.status) === 'resolved';
+  const status = String(conv.status ?? payload.status ?? '');
+  const resolved = status === 'resolved';
   const humanActive = assigned && !resolved;
+  // Diagnostic: the exact payload shape varies by Chatwoot version/event — log what we parsed.
+  console.log(`[handoff] event=${payload.event} status=${status} assigned=${assigned} assigneeId=${assigneeId} resolved=${resolved} → ${humanActive ? 'PAUSE' : 'RESUME'}`);
 
   // Must match the key the debounce worker checks: human_takeover:t:{tenant}:{agent}:{jidKey}
   // where jidKey is the sanitized contact JID. Fall back to a phone-derived JID if needed.
