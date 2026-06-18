@@ -269,6 +269,60 @@ async function main() {
     }
   });
 
+  // ── Chatwoot outgoing channel webhook ──────────────────────────────────────
+  // Set as the inbox's webhook_url. Chatwoot POSTs outgoing messages here for delivery.
+  // We deliver HUMAN replies to WhatsApp via Evolution. Our own mirrored bot messages carry
+  // a source_id (Chatwoot won't call this for them); we skip anything with a source_id or
+  // private notes as a safety net against loops.
+  webApp.post('/webhook/chatwoot-out/:instance', async (req, res) => {
+    res.status(200).json({ ok: true });
+    const { instance } = req.params;
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    try {
+      const msg = (b.message ?? b) as Record<string, unknown>;
+      const messageType = String(b.message_type ?? msg.message_type ?? '');
+      if (messageType && messageType !== 'outgoing') return;          // only deliver agent messages
+      if (msg.private === true || b.private === true) return;          // skip internal notes
+      if (msg.source_id || b.source_id) return;                        // our own mirror → already sent
+      // Skip messages created by a bot/automation (only deliver real human/agent replies).
+      const content = String(msg.content ?? b.content ?? '').trim();
+
+      const conv = (b.conversation ?? {}) as Record<string, unknown>;
+      const meta = (conv.meta ?? {}) as Record<string, unknown>;
+      const sender = (meta.sender ?? conv.contact_inbox ?? {}) as Record<string, unknown>;
+      const contact = (b.contact ?? {}) as Record<string, unknown>;
+      const rawPhone = String(
+        (sender.phone_number ?? contact.phone_number ?? (msg.conversation as Record<string, unknown> | undefined)?.phone_number ?? '') as string,
+      ).replace(/\D/g, '');
+      const identifier = String((sender.identifier ?? contact.identifier ?? '') as string);
+      const phone = rawPhone || identifier.replace(/@[^@]+$/, '').replace(/\D/g, '');
+      if (!phone) { console.warn(`[chatwoot-out] no phone in payload instance=${instance}`); return; }
+      const number = `${phone}@s.whatsapp.net`;
+      const evUrl = config.evolution.url.replace(/\/$/, '');
+      const evHeaders = { 'Content-Type': 'application/json', apikey: config.evolution.apiKey };
+
+      // Attachments first (human sent media), then text.
+      const attachments = (msg.attachments ?? []) as Array<Record<string, unknown>>;
+      for (const att of attachments) {
+        const url = String((att.data_url ?? att.thumb_url ?? '') as string);
+        if (!url) continue;
+        const fileType = String((att.file_type ?? '') as string);
+        const mediatype = fileType === 'image' ? 'image' : fileType === 'video' ? 'video' : fileType === 'audio' ? 'audio' : 'document';
+        const endpoint = mediatype === 'audio' ? 'sendWhatsAppAudio' : 'sendMedia';
+        const payload = mediatype === 'audio'
+          ? { number, audio: url }
+          : { number, mediatype, media: url, caption: content || undefined };
+        await fetch(`${evUrl}/message/${endpoint}/${instance}`, { method: 'POST', headers: evHeaders, body: JSON.stringify(payload) }).catch(() => {});
+      }
+      if (content && attachments.length === 0) {
+        await fetch(`${evUrl}/message/sendText/${instance}`, { method: 'POST', headers: evHeaders, body: JSON.stringify({ number, text: content }) }).catch(() => {});
+      }
+      console.log(`[chatwoot-out] delivered instance=${instance} phone=${phone} text=${content.slice(0, 40)} atts=${attachments.length}`);
+    } catch (e) {
+      console.error(`[chatwoot-out] error instance=${instance}:`, String(e));
+    }
+  });
+
   // ── REST API ──────────────────────────────────────────────────────────────
   webApp.use('/api', apiRouter);
 

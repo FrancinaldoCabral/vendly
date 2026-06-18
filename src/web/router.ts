@@ -2,7 +2,7 @@ import { Router } from 'express';
 import jwt from 'jsonwebtoken';
 import { requireAuth, requireAdmin, signTenantToken } from './auth.js';
 import { config } from '../config.js';
-import { checkWcSubscription, findOrCreateTenant, sendMagicLink, reprovisionAgent, getChatwootSsoUrl } from '../services/provisioning.js';
+import { checkWcSubscription, findOrCreateTenant, sendMagicLink, reprovisionAgent, getChatwootSsoUrl, disableEvolutionChatwoot } from '../services/provisioning.js';
 import { tenantsRouter } from './routes/tenants.js';
 import { agentsRouter } from './routes/agents.js';
 import { connectionsRouter } from './routes/connections.js';
@@ -338,6 +338,63 @@ apiRouter.post('/admin/seed-integrations', requireAuth, requireAdmin, async (req
     }
 
     res.json({ ok: true, seeded: EXAMPLE_INTEGRATIONS.map(e => e.name), agents: updated });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// ── Admin: migrate an existing tenant's Chatwoot to "we own the inbox" ─────────
+// Disables Evolution's native integration, repoints each inbox's delivery webhook to us,
+// and resets the account webhook to conversation (handoff) events only.
+apiRouter.post('/admin/migrate-chatwoot', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { email, tenantId } = req.body as { email?: string; tenantId?: string };
+    const db = await getDb();
+    const tenant = (tenantId
+      ? await db.collection('tenants').findOne({ _id: tenantId } as Record<string, unknown>)
+      : await db.collection('tenants').findOne({ email })) as { _id: string; chatwoot?: { accountId: number; apiKey: string } } | null;
+    if (!tenant?.chatwoot?.accountId) { res.status(404).json({ error: 'tenant/chatwoot not found' }); return; }
+
+    const accountId = tenant.chatwoot.accountId;
+    const apiKey = tenant.chatwoot.apiKey;
+    const cwUrl = config.chatwoot.url.replace(/\/$/, '');
+    const cwHeaders = { 'Content-Type': 'application/json', 'api_access_token': apiKey };
+    const results: Record<string, unknown> = {};
+
+    const agents = await db.collection('agents').find({ tenantId: tenant._id }).toArray() as unknown as Array<{ _id: string; connectionId?: string; evolutionInstance?: string; chatwootInboxId?: number }>;
+
+    // 1. For each distinct inbox: disable Evolution integration + repoint delivery webhook to us.
+    const seen = new Set<string>();
+    for (const a of agents) {
+      const instance = a.evolutionInstance; const inboxId = a.chatwootInboxId;
+      if (!instance || !inboxId || seen.has(`${instance}:${inboxId}`)) continue;
+      seen.add(`${instance}:${inboxId}`);
+      await disableEvolutionChatwoot(instance);
+      const channelWebhook = `${config.app.url}/webhook/chatwoot-out/${instance}`;
+      const pr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/inboxes/${inboxId}`, {
+        method: 'PATCH', headers: cwHeaders, body: JSON.stringify({ channel: { webhook_url: channelWebhook } }),
+      });
+      results[`inbox_${inboxId}`] = `patch ${pr.status} ${(await pr.text()).slice(0, 100)}`;
+    }
+
+    // 2. Reset account webhooks: drop ours, recreate with conversation (handoff) events only.
+    const wr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/webhooks`, { headers: cwHeaders });
+    if (wr.ok) {
+      const wd = await wr.json() as { payload?: Array<{ id: number; url: string }> };
+      for (const h of wd.payload ?? []) {
+        if (String(h.url).includes('/webhook/chatwoot/')) {
+          await fetch(`${cwUrl}/api/v1/accounts/${accountId}/webhooks/${h.id}`, { method: 'DELETE', headers: cwHeaders });
+        }
+      }
+    }
+    const subjects = new Set(agents.map(a => a.connectionId ?? a._id));
+    for (const s of subjects) {
+      const cr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/webhooks`, {
+        method: 'POST', headers: cwHeaders,
+        body: JSON.stringify({ url: `${config.app.url}/webhook/chatwoot/${s}`, subscriptions: ['conversation_updated', 'conversation_resolved', 'conversation_status_changed'] }),
+      });
+      results[`webhook_${s}`] = `create ${cr.status}`;
+    }
+
+    res.json({ ok: true, results });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
