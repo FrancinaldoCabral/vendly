@@ -9,6 +9,7 @@ import { config } from '../config.js';
 import { agentLoop, type AgentLoopContext, type OpenRouterMessage } from './agent-loop.js';
 import { groupFilter, type GroupConfig } from './group-filter.js';
 import { generateTts, buildMediaContentPart, type MediaKind } from './media.js';
+import { CATALOG_BY_ID, type AssetKind } from './tool-catalog.js';
 
 const DEBOUNCE_MS = 12_000; // 12 s — allows for back-to-back typing before processing
 const MAX_STORED_MESSAGES = 500; // hard safety cap on stored turns (summary keeps meaning)
@@ -27,7 +28,7 @@ IMPORTANTE: Você está respondendo via WhatsApp. Escreva respostas curtas e nat
 // The client must NOT have to teach the agent that it can hear/see/send audio:
 // the platform handles media in/out automatically; the model only needs to know
 // it is allowed, so it never wrongly refuses.
-const CAPABILITIES_SUFFIX = `
+const CAPABILITIES_MEDIA = `
 
 ---
 SUAS CAPACIDADES (já habilitadas pela plataforma — nunca diga que não consegue):
@@ -38,6 +39,43 @@ SUAS CAPACIDADES (já habilitadas pela plataforma — nunca diga que não conseg
   que a plataforma a converte e envia como áudio automaticamente.
 - NUNCA afirme que não pode ouvir, ver, ler ou enviar áudio/mídia — você pode.
   Não mencione detalhes técnicos; apenas atenda com naturalidade.`;
+
+// Friendly noun for each asset kind, used when listing the configured items per action.
+const ASSET_NOUN: Record<AssetKind, string> = {
+  menus: 'menus', reactions: 'reações', stickers: 'figurinhas', labels: 'etiquetas',
+  files: 'arquivos', locations: 'localizações', contacts: 'contatos',
+};
+
+/**
+ * Build the capabilities block injected into the system prompt. It enumerates EXACTLY the
+ * curated actions this agent has enabled AND configured (same rule as buildToolList in the
+ * agent-loop), so the model knows what it can really do — and, crucially, an explicit
+ * anti-hallucination rule so it never claims to have performed an action it cannot.
+ */
+function buildCapabilitiesSuffix(agent: AgentDoc): string {
+  const lines: string[] = [];
+  for (const id of agent.builtinTools ?? []) {
+    const cat = CATALOG_BY_ID.get(id);
+    if (!cat) continue;
+    const items = ((agent.assets as Record<string, Array<{ label?: string }>> | undefined)?.[cat.asset] ?? [])
+      .map(i => i.label).filter(Boolean) as string[];
+    if (items.length === 0) continue; // enabled but nothing configured → not actually available
+    lines.push(`- ${cat.label} (${ASSET_NOUN[cat.asset]} disponíveis: ${items.join(', ')}).`);
+  }
+
+  const actionsBlock = lines.length
+    ? `\n\nAÇÕES ESPECIAIS QUE VOCÊ PODE EXECUTAR (cada uma tem uma ferramenta própria — só estas estão habilitadas):\n${lines.join('\n')}\n(Além destas, você pode ter integrações/ferramentas listadas separadamente.)`
+    : `\n\nVocê NÃO tem ações especiais configuradas (menus, reações, figurinhas, etiquetas, etc.). Você só conversa por texto/áudio (e quaisquer integrações listadas separadamente).`;
+
+  const antiHallucination = `
+
+REGRA CRÍTICA — NUNCA FINJA UMA AÇÃO:
+- Só considere uma ação realizada se você REALMENTE chamou a ferramenta correspondente e ela retornou sucesso.
+- NUNCA diga que etiquetou, removeu etiqueta, reagiu, enviou menu/figurinha/arquivo/localização/contato se não há ferramenta para isso ou se você não a chamou.
+- Se o cliente (ou a situação) pedir algo fora das ações acima, NÃO simule: faça o que estiver ao seu alcance por texto e, se for o caso, registre internamente sem anunciar uma ação inexistente.`;
+
+  return CAPABILITIES_MEDIA + actionsBlock + antiHallucination;
+}
 
 // ── In-memory timer map ──────────────────────────────────────────────────────
 
@@ -281,7 +319,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
 
   // Build messages array: system + history + new user message
   const messages: OpenRouterMessage[] = [
-    { role: 'system', content: agentDoc.systemPrompt + CAPABILITIES_SUFFIX + WHATSAPP_STYLE_SUFFIX + audioNote },
+    { role: 'system', content: agentDoc.systemPrompt + buildCapabilitiesSuffix(agentDoc) + WHATSAPP_STYLE_SUFFIX + audioNote },
     ...history,
     { role: 'user', content: userContent },
   ];
@@ -446,7 +484,7 @@ export async function handleToolResult(token: string, resultText: string): Promi
   const note = `[Resultado da ferramenta "${p.toolName}"]\n${resultText}\n\n`
     + `Responda agora ao cliente com base nesse resultado, de forma natural e curta.`;
   const messages: OpenRouterMessage[] = [
-    { role: 'system', content: agentDoc.systemPrompt + CAPABILITIES_SUFFIX + WHATSAPP_STYLE_SUFFIX },
+    { role: 'system', content: agentDoc.systemPrompt + buildCapabilitiesSuffix(agentDoc) + WHATSAPP_STYLE_SUFFIX },
     ...history,
     { role: 'user', content: note },
   ];
