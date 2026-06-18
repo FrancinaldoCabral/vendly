@@ -723,8 +723,9 @@ async function registerChatwootWebhook(accountId: number, apiKey: string, webhoo
       body: JSON.stringify({
         url: webhookUrl,
         // Handoff only — message mirroring is ours now, so we don't subscribe to message_created
-        // (that would loop our mirrored messages back to us).
-        subscriptions: ['conversation_updated', 'conversation_resolved', 'conversation_status_changed'],
+        // (that would loop our mirrored messages back to us). conversation_status_changed fires
+        // on resolve/open; conversation_resolved is NOT a valid Chatwoot webhook event.
+        subscriptions: ['conversation_updated', 'conversation_status_changed'],
       }),
     });
     const body = await r.text();

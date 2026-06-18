@@ -391,9 +391,9 @@ apiRouter.post('/admin/migrate-chatwoot', requireAuth, requireAdmin, async (req,
     for (const s of subjects) {
       const cr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/webhooks`, {
         method: 'POST', headers: cwHeaders,
-        body: JSON.stringify({ url: `${config.app.url}/webhook/chatwoot/${s}`, subscriptions: ['conversation_updated', 'conversation_resolved', 'conversation_status_changed'] }),
+        body: JSON.stringify({ url: `${config.app.url}/webhook/chatwoot/${s}`, subscriptions: ['conversation_updated', 'conversation_status_changed'] }),
       });
-      results[`webhook_${s}`] = `create ${cr.status}`;
+      results[`webhook_${s}`] = `create ${cr.status} ${(await cr.text()).slice(0, 120)}`;
     }
 
     res.json({ ok: true, results });
