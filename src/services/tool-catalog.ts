@@ -84,6 +84,20 @@ export const TOOL_CATALOG: CatalogTool[] = [
     },
   },
   {
+    id: 'acao_remover_etiqueta',
+    label: 'Remover etiqueta da conversa (CRM)',
+    description: 'O agente retira da conversa atual uma das etiquetas que você cadastrou. Útil quando uma etapa termina (ex.: deixou de ser "Lead quente" após a compra). Invisível para o cliente.',
+    example: 'O cliente fecha a compra → o agente remove a etiqueta "Lead quente".',
+    category: 'Organização',
+    asset: 'labels',
+    assetParam: 'etiqueta',
+    params: {
+      type: 'object',
+      required: ['etiqueta'],
+      properties: { etiqueta: { type: 'string', description: 'Qual etiqueta remover (use exatamente um dos rótulos disponíveis)' } },
+    },
+  },
+  {
     id: 'acao_enviar_arquivo',
     label: 'Enviar um arquivo',
     description: 'O agente envia um dos arquivos que você cadastrou (imagem, vídeo ou documento).',

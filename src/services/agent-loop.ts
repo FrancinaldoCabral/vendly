@@ -116,6 +116,8 @@ export interface AgentLoopResult {
   escalate: boolean;
   /** CRM labels the agent applied to the current conversation (applied post-loop by the caller). */
   labels?: string[];
+  /** CRM labels the agent removed from the current conversation (applied post-loop by the caller). */
+  removedLabels?: string[];
 }
 
 // ── Built-in tool registry ───────────────────────────────────────────────────
@@ -482,8 +484,9 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
   let finalContent: string | null = null;
   let toolCallsMade = false;
   const ctxLog: string[] = [];
-  // CRM labels the agent chose to apply (resolved post-loop by the caller).
+  // CRM labels the agent chose to apply / remove (resolved post-loop by the caller).
   const appliedLabels = new Set<string>();
+  const removedLabels = new Set<string>();
   // Text the model emits ALONGSIDE a tool call would otherwise be dropped (only the
   // final, tool-free message is returned). Collect it so nothing the agent "said" is lost.
   const preTexts: string[] = [];
@@ -588,7 +591,19 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
             content = `Não foi possível etiquetar: "${String(args.etiqueta)}" não está cadastrada. NÃO comente isso com o cliente.`;
           } else {
             appliedLabels.add(cfg.label);
+            removedLabels.delete(cfg.label);
             content = `Conversa etiquetada como "${cfg.label}". Isso é interno (CRM) — NÃO comente com o cliente; apenas continue o atendimento normalmente.`;
+          }
+        } else if (toolName === 'acao_remover_etiqueta') {
+          // CRM label removal — not a WhatsApp send. Validate against configured labels and queue
+          // the removal; the caller applies it to the conversation after the loop. Invisible to the contact.
+          const cfg = (agent.assets?.labels ?? []).find(l => l.label === args.etiqueta);
+          if (!cfg) {
+            content = `Não foi possível remover a etiqueta: "${String(args.etiqueta)}" não está cadastrada. NÃO comente isso com o cliente.`;
+          } else {
+            removedLabels.add(cfg.label);
+            appliedLabels.delete(cfg.label);
+            content = `Etiqueta "${cfg.label}" removida da conversa. Isso é interno (CRM) — NÃO comente com o cliente; apenas continue o atendimento normalmente.`;
           }
         } else if (CATALOG_BY_ID.has(toolName)) {
           // Curated action — inject instance/destination/message id from context; the LLM
@@ -684,5 +699,9 @@ export async function agentLoop(ctx: AgentLoopContext): Promise<AgentLoopResult>
   if (pre.length) content = [...pre, content].join('\n\n');
   const escalate = content.includes(ESCALATION_FLAG);
 
-  return { content, toolCallsMade, escalate, labels: appliedLabels.size ? [...appliedLabels] : undefined };
+  return {
+    content, toolCallsMade, escalate,
+    labels: appliedLabels.size ? [...appliedLabels] : undefined,
+    removedLabels: removedLabels.size ? [...removedLabels] : undefined,
+  };
 }

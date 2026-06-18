@@ -309,7 +309,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     },
   };
 
-  let result: { content: string; toolCallsMade: boolean; escalate: boolean; labels?: string[] };
+  let result: { content: string; toolCallsMade: boolean; escalate: boolean; labels?: string[]; removedLabels?: string[] };
   try {
     result = await agentLoop(loopCtx);
   } catch (e) {
@@ -317,7 +317,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     return;
   }
 
-  const { content, escalate, labels } = result;
+  const { content, escalate, labels, removedLabels } = result;
 
   // Skip signals
   if (content === '[SKIP]' || !content.trim()) {
@@ -358,12 +358,12 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     }
   }
 
-  // Apply CRM labels the agent chose (ensure they exist, then merge onto the conversation).
-  if (labels?.length) {
+  // Apply CRM label changes the agent chose (add and/or remove; we fetch + reconcile the set).
+  if (labels?.length || removedLabels?.length) {
     if (resolvedConvId && cwAccountId && cwApiKey) {
-      await applyChatwootLabels(resolvedConvId, labels, cwAccountId, cwApiKey);
+      await applyChatwootLabels(resolvedConvId, labels ?? [], removedLabels ?? [], cwAccountId, cwApiKey);
     } else {
-      console.warn(`[debounce] labels requested but no Chatwoot conversation resolved (agent=${agentId} phone=${senderPhone})`);
+      console.warn(`[debounce] label change requested but no Chatwoot conversation resolved (agent=${agentId} phone=${senderPhone})`);
     }
   }
 
@@ -767,40 +767,45 @@ export async function postChatwootMessage(
 }
 
 /**
- * Apply CRM labels to a Chatwoot conversation. Ensures each label exists at the account
- * level first (so it shows up properly), then MERGES with the conversation's existing labels
- * (the endpoint replaces the full set, so we fetch + union).
+ * Reconcile CRM labels on a Chatwoot conversation. The endpoint replaces the full set,
+ * so we fetch the current labels, add `addLabels`, drop `removeLabels`, and POST the result.
+ * Labels to add are first ensured to exist at the account level (so they show up properly).
  */
 async function applyChatwootLabels(
   conversationId: number,
-  labels: string[],
+  addLabels: string[],
+  removeLabels: string[],
   accountId: string,
   apiKey: string,
 ): Promise<void> {
-  if (!accountId || !apiKey || !conversationId || labels.length === 0) return;
+  if (!accountId || !apiKey || !conversationId || (addLabels.length === 0 && removeLabels.length === 0)) return;
   const cwUrl = config.chatwoot.url.replace(/\/$/, '');
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'api_access_token': apiKey };
-  // Chatwoot label titles are lowercase/sluggy; normalize so create + apply match.
-  const wanted = labels.map(l => l.trim().toLowerCase().replace(/\s+/g, '-')).filter(Boolean);
+  // Chatwoot label titles are lowercase/sluggy; normalize so create + apply + remove match.
+  const slug = (l: string) => l.trim().toLowerCase().replace(/\s+/g, '-');
+  const toAdd = addLabels.map(slug).filter(Boolean);
+  const toRemove = new Set(removeLabels.map(slug).filter(Boolean));
   try {
-    // 1. Ensure each label exists as an account label.
-    const existingTitles = new Set<string>();
-    const lr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/labels`, { headers });
-    if (lr.ok) {
-      const ld = await lr.json() as { payload?: Array<{ title: string }> };
-      (ld.payload ?? []).forEach(l => existingTitles.add(l.title));
-    }
-    for (const t of wanted) {
-      if (!existingTitles.has(t)) {
-        const cr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/labels`, {
-          method: 'POST', headers,
-          body: JSON.stringify({ title: t, color: '#1f93ff', show_on_sidebar: true }),
-        });
-        console.log(`[debounce] Chatwoot label create "${t}": ${cr.status}`);
+    // 1. Ensure each label to add exists as an account label.
+    if (toAdd.length) {
+      const existingTitles = new Set<string>();
+      const lr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/labels`, { headers });
+      if (lr.ok) {
+        const ld = await lr.json() as { payload?: Array<{ title: string }> };
+        (ld.payload ?? []).forEach(l => existingTitles.add(l.title));
+      }
+      for (const t of toAdd) {
+        if (!existingTitles.has(t)) {
+          const cr = await fetch(`${cwUrl}/api/v1/accounts/${accountId}/labels`, {
+            method: 'POST', headers,
+            body: JSON.stringify({ title: t, color: '#1f93ff', show_on_sidebar: true }),
+          });
+          console.log(`[debounce] Chatwoot label create "${t}": ${cr.status}`);
+        }
       }
     }
 
-    // 2. Merge onto the conversation.
+    // 2. Reconcile onto the conversation: (existing ∪ toAdd) \ toRemove.
     const url = `${cwUrl}/api/v1/accounts/${accountId}/conversations/${conversationId}/labels`;
     let existing: string[] = [];
     const gr = await fetch(url, { headers });
@@ -808,10 +813,10 @@ async function applyChatwootLabels(
       const d = await gr.json() as { payload?: string[] };
       existing = Array.isArray(d.payload) ? d.payload : [];
     }
-    const merged = Array.from(new Set([...existing, ...wanted]));
+    const merged = Array.from(new Set([...existing, ...toAdd])).filter(l => !toRemove.has(l));
     const pr = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ labels: merged }) });
     const body = await pr.text();
-    console.log(`[debounce] Chatwoot labels conv=${conversationId} status=${pr.status} labels=[${merged.join(',')}] resp=${body.slice(0, 150)}`);
+    console.log(`[debounce] Chatwoot labels conv=${conversationId} status=${pr.status} labels=[${merged.join(',')}] +[${toAdd.join(',')}] -[${[...toRemove].join(',')}] resp=${body.slice(0, 150)}`);
   } catch (e) {
     console.error('[debounce] Chatwoot label apply failed:', String(e));
   }
