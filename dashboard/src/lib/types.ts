@@ -58,6 +58,12 @@ export interface CatalogTool {
   assetParam?: string;
 }
 
+export interface ProvisionIssue {
+  kind: 'crm_account' | 'whatsapp_inbox' | 'agent_sync';
+  label: string;
+  connectionId?: string;
+}
+
 export interface GroupConfig {
   respondToMentions: boolean;
   respondToReplies: boolean;

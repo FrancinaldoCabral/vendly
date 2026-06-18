@@ -1,5 +1,5 @@
 import { getToken } from './auth';
-import type { Tenant, Agent, KnowledgePoint, ScheduledPost, Conversation, Connection, ContactFilter, CatalogTool } from './types';
+import type { Tenant, Agent, KnowledgePoint, ScheduledPost, Conversation, Connection, ContactFilter, CatalogTool, ProvisionIssue } from './types';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
@@ -40,6 +40,12 @@ export const api = {
   deleteConnection: (id: string) => req<{ ok: boolean }>(`/connections/${id}`, { method: 'DELETE' }),
   getConnectionQr: (id: string) => req<{ base64: string | null; code: string | null }>(`/connections/${id}/qr`),
   getConnectionStatus: (id: string) => req<{ connected: boolean; connectionStatus: string }>(`/connections/${id}/status`),
+
+  // Provisioning health (self-service repair of failed onboarding)
+  getProvisioningHealth: () =>
+    req<{ healthy: boolean; issues: ProvisionIssue[] }>('/health/provisioning'),
+  repairProvisioning: () =>
+    req<{ ok: boolean; fixed: string[]; issues: ProvisionIssue[] }>('/health/repair', { method: 'POST' }),
 
   // Tool catalog (friendly built-in tools)
   getToolCatalog: () => req<CatalogTool[]>('/tool-catalog'),

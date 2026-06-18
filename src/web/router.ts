@@ -2,7 +2,7 @@ import { Router } from 'express';
 import jwt from 'jsonwebtoken';
 import { requireAuth, requireAdmin, signTenantToken } from './auth.js';
 import { config } from '../config.js';
-import { checkWcSubscription, findOrCreateTenant, sendMagicLink, reprovisionAgent, getChatwootSsoUrl, disableEvolutionChatwoot } from '../services/provisioning.js';
+import { checkWcSubscription, findOrCreateTenant, sendMagicLink, reprovisionAgent, getChatwootSsoUrl, disableEvolutionChatwoot, checkTenantProvisioning, repairTenantProvisioning } from '../services/provisioning.js';
 import { tenantsRouter } from './routes/tenants.js';
 import { agentsRouter } from './routes/agents.js';
 import { connectionsRouter } from './routes/connections.js';
@@ -529,6 +529,25 @@ apiRouter.post('/uploads', async (req, res) => {
     if (data.length > 25 * 1024 * 1024) { res.status(413).json({ error: 'arquivo muito grande (máx. 25 MB)' }); return; }
     const url = await uploadFile(tenantId === '__admin__' ? 'admin' : tenantId, filename ?? 'arquivo', contentType ?? '', data);
     res.json({ url });
+  } catch (e) { res.status(500).json({ error: String(e instanceof Error ? e.message : e) }); }
+});
+
+// ── Provisioning health (self-service repair) ────────────────────────────────
+// Surfaces incomplete onboarding (e.g. a Chatwoot inbox that failed to create) and lets the
+// client fix it with one click — no support ticket needed.
+apiRouter.get('/health/provisioning', async (req, res) => {
+  try {
+    const tenantId = req.auth!.tenantId;
+    if (tenantId === '__admin__') { res.json({ healthy: true, issues: [] }); return; }
+    res.json(await checkTenantProvisioning(tenantId));
+  } catch (e) { res.status(500).json({ error: String(e instanceof Error ? e.message : e) }); }
+});
+
+apiRouter.post('/health/repair', async (req, res) => {
+  try {
+    const tenantId = req.auth!.tenantId;
+    if (tenantId === '__admin__') { res.status(400).json({ error: 'tenant required' }); return; }
+    res.json(await repairTenantProvisioning(tenantId));
   } catch (e) { res.status(500).json({ error: String(e instanceof Error ? e.message : e) }); }
 });
 

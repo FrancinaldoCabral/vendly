@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Typography, Card, Form, Input, Button, Tag, message, Descriptions, Select, Popconfirm, Space, Alert } from 'antd';
-import { SettingOutlined, SaveOutlined, ClearOutlined, PauseCircleOutlined, PlayCircleOutlined } from '@ant-design/icons';
+import { Typography, Card, Form, Input, Button, Tag, message, Descriptions, Select, Popconfirm, Space, Alert, List } from 'antd';
+import { SettingOutlined, SaveOutlined, ClearOutlined, PauseCircleOutlined, PlayCircleOutlined, CheckCircleOutlined, ToolOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import dayjs from 'dayjs';
@@ -12,6 +12,19 @@ export default function Settings() {
   const [form] = Form.useForm();
   const { data: me } = useQuery({ queryKey: ['me'], queryFn: api.getMe });
   const { data: agents = [] } = useQuery({ queryKey: ['agents'], queryFn: api.getAgents });
+  const { data: health } = useQuery({ queryKey: ['provisioning-health'], queryFn: api.getProvisioningHealth, refetchInterval: 60_000 });
+
+  const repair = useMutation({
+    mutationFn: () => api.repairProvisioning(),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ['provisioning-health'] });
+      qc.invalidateQueries({ queryKey: ['connections'] });
+      qc.invalidateQueries({ queryKey: ['agents'] });
+      if (r.ok) message.success(r.fixed.length ? `Resolvido: ${r.fixed.join(' ')}` : 'Tudo certo — nada a corrigir.');
+      else message.warning('Alguns itens ainda precisam de atenção. Tente novamente em instantes.');
+    },
+    onError: (e: Error) => message.error(e.message),
+  });
 
   const [clientAgent, setClientAgent] = useState<string>();
   const [clientPhone, setClientPhone] = useState('');
@@ -61,6 +74,44 @@ export default function Settings() {
         Dados da sua conta e ferramentas de manutenção. Para ver as conversas, use a
         <b> Central de Conversas</b> (botão no topo) ou o próprio WhatsApp.
       </Paragraph>
+
+      {health && !health.healthy && (
+        <Card style={{ marginBottom: 16, borderColor: '#faad14' }}>
+          <Alert
+            type="warning"
+            showIcon
+            message="Há itens de configuração pendentes"
+            description={
+              <>
+                <Paragraph type="secondary" style={{ fontSize: 13, marginBottom: 8 }}>
+                  Detectamos provisionamentos que não foram concluídos. Isso pode acontecer por uma
+                  instabilidade momentânea durante a configuração. Clique em <b>Resolver</b> para
+                  corrigir automaticamente.
+                </Paragraph>
+                <List
+                  size="small"
+                  dataSource={health.issues}
+                  renderItem={(it) => <List.Item style={{ paddingLeft: 0 }}>• {it.label}</List.Item>}
+                  style={{ marginBottom: 8 }}
+                />
+                <Button type="primary" icon={<ToolOutlined />} loading={repair.isPending} onClick={() => repair.mutate()}>
+                  Resolver
+                </Button>
+              </>
+            }
+          />
+        </Card>
+      )}
+
+      {health?.healthy && (
+        <Alert
+          type="success"
+          showIcon
+          icon={<CheckCircleOutlined />}
+          message="Tudo provisionado e funcionando."
+          style={{ marginBottom: 16 }}
+        />
+      )}
 
       <Card title="Minha conta" style={{ marginBottom: 16 }}>
         <Descriptions column={1} style={{ marginBottom: 16 }}>

@@ -691,7 +691,7 @@ export async function disableEvolutionChatwoot(instance: string, accountId?: num
  * so WE mirror messages (with source_id → no "Failed to send") and deliver human replies via
  * Evolution. Evolution's native Chatwoot integration is disabled to avoid double mirroring.
  */
-async function createChatwootInbox(
+export async function createChatwootInbox(
   instance: string,
   name: string,
   subjectId: string, // connectionId (or legacy agentId) — used for the account/handoff webhook
@@ -889,6 +889,83 @@ export async function reprovisionAgent(agentId: string): Promise<{ ok: boolean; 
   } catch (e) { results.chatwoot_set = `error: ${String(e)}`; }
 
   return { ok: true, results };
+}
+
+// ── Provisioning health (self-service repair) ────────────────────────────────
+
+export interface ProvisionIssue {
+  kind: 'crm_account' | 'whatsapp_inbox' | 'agent_sync';
+  label: string;            // friendly, client-facing
+  connectionId?: string;
+}
+
+/**
+ * Inspect a tenant's provisioning and report anything incomplete (e.g. a Chatwoot inbox that
+ * failed to create during onboarding). Drives the "Resolver" UI in the dashboard.
+ */
+export async function checkTenantProvisioning(tenantId: string): Promise<{ healthy: boolean; issues: ProvisionIssue[] }> {
+  const db = await getDb();
+  const issues: ProvisionIssue[] = [];
+
+  const tenant = await db.collection<TenantDoc>('tenants').findOne({ _id: tenantId });
+  if (!tenant?.chatwoot?.accountId) {
+    issues.push({ kind: 'crm_account', label: 'Sua Central de Conversas (CRM) ainda não foi criada.' });
+  }
+
+  const connections = await db.collection<ConnectionDoc>('connections').find({ tenantId }).toArray();
+  for (const c of connections) {
+    if (!c.chatwootInboxId) {
+      issues.push({ kind: 'whatsapp_inbox', connectionId: c._id, label: `A conexão de WhatsApp "${c.name}" não está ligada ao CRM (mensagens não aparecem na Central).` });
+    }
+  }
+
+  const agents = await db.collection<AgentDoc>('agents').find({ tenantId }).toArray();
+  for (const a of agents) {
+    if (!a.connectionId) continue;
+    const conn = connections.find(c => c._id === a.connectionId);
+    if (conn?.chatwootInboxId && a.chatwootInboxId !== conn.chatwootInboxId) {
+      issues.push({ kind: 'agent_sync', connectionId: conn._id, label: `O agente "${a.name}" precisa ser sincronizado com o CRM.` });
+    }
+  }
+
+  return { healthy: issues.length === 0, issues };
+}
+
+/**
+ * Idempotently repair a tenant's provisioning: create a missing Chatwoot account, create any
+ * missing inboxes (and disable Evolution's native integration + register the handoff webhook),
+ * re-sync the agents' denormalized inbox id, and refresh each Evolution webhook. Safe to re-run.
+ */
+export async function repairTenantProvisioning(tenantId: string): Promise<{ ok: boolean; fixed: string[]; issues: ProvisionIssue[] }> {
+  const db = await getDb();
+  const fixed: string[] = [];
+
+  // 1. Ensure the Chatwoot account exists (creates + heals if missing).
+  const { accountId: cwAccountId, apiKey: cwApiKey } = await ensureTenantChatwoot(tenantId);
+
+  // 2. Walk every connection: create missing inbox, re-sync agents, refresh Evolution webhook.
+  const connections = await db.collection<ConnectionDoc>('connections').find({ tenantId }).toArray();
+  for (const c of connections) {
+    let inboxId = c.chatwootInboxId;
+    if (!inboxId) {
+      inboxId = (await createChatwootInbox(c.evolutionInstance, c.name, c._id, cwAccountId, cwApiKey)) ?? undefined;
+      if (inboxId) {
+        await db.collection<ConnectionDoc>('connections').updateOne({ _id: c._id } as Record<string, unknown>, { $set: { chatwootInboxId: inboxId } });
+        fixed.push(`Central de Conversas ligada à conexão "${c.name}".`);
+      }
+    }
+    if (inboxId) {
+      const r = await db.collection<AgentDoc>('agents').updateMany(
+        { connectionId: c._id, chatwootInboxId: { $ne: inboxId } } as Record<string, unknown>,
+        { $set: { chatwootInboxId: inboxId } },
+      );
+      if (r.modifiedCount) fixed.push(`Sincronizado ${r.modifiedCount} agente(s) da conexão "${c.name}".`);
+    }
+    try { await reprovisionEvolutionWebhook(c.evolutionInstance); } catch { /* non-fatal */ }
+  }
+
+  const { issues } = await checkTenantProvisioning(tenantId);
+  return { ok: issues.length === 0, fixed, issues };
 }
 
 // ── Qdrant ───────────────────────────────────────────────────────────────────

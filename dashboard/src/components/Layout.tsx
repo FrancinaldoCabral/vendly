@@ -24,6 +24,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
   const { data: me } = useQuery({ queryKey: ['me'], queryFn: api.getMe });
   const { data: connections = [] } = useQuery({ queryKey: ['connections'], queryFn: api.getConnections });
+  const { data: health } = useQuery({ queryKey: ['provisioning-health'], queryFn: api.getProvisioningHealth, refetchInterval: 60_000 });
 
   // Gate: until the negócio has at least one WhatsApp connected, the rest is locked.
   const configured = connections.length > 0;
@@ -136,6 +137,16 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         </Header>
 
         <Content style={{ margin: 24, background: '#f5f5f5', borderRadius: 8, padding: 24, minHeight: 360 }}>
+          {health && !health.healthy && loc.pathname !== '/settings' && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="Há itens de configuração pendentes"
+              description="Alguns provisionamentos não foram concluídos. Vá em Configurações e clique em Resolver para corrigir automaticamente."
+              action={<Button type="primary" size="small" onClick={() => nav('/settings')}>Resolver</Button>}
+            />
+          )}
           {!configured && loc.pathname !== '/connections' && loc.pathname !== '/settings' && (
             <Alert
               type="info"
