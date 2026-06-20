@@ -506,6 +506,11 @@ export async function handleEvolutionMessageWebhook(
       const replyToBot = !!reply.stanzaId && (
         repliesBotMsg || idMatches(replyParticipant) || (!haveLid && !replyParticipant)
       );
+      // TEMP diagnostic — reveals why a reply is/ isn't treated as "to the bot".
+      const botSentSample = await redis.smembers(`bot_sent:${instance}`).catch(() => [] as string[]);
+      const ctx = ((message.extendedTextMessage as Record<string, unknown> | undefined)?.contextInfo
+        ?? (message as Record<string, unknown>).contextInfo ?? {}) as Record<string, unknown>;
+      console.log(`[ev-webhook] GROUP-DIAG jid=${jid} stanzaId=${reply.stanzaId ?? 'none'} participant=${replyParticipant || 'none'} repliesBotMsg=${repliesBotMsg} replyToBot=${replyToBot} haveLid=${haveLid} botIds=[${botIds.join(',')}] bot_sent(${botSentSample.length})=[${botSentSample.slice(0, 6).join(',')}] mentions=[${extractMentionedPhones(message).join(',')}] ctxKeys=${JSON.stringify(Object.keys(ctx))}`);
       const gate = groupFilter({
         jid,
         messageText: cheapText(message), // text only — audio NOT transcribed yet
