@@ -207,9 +207,16 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     .map(r => { try { return JSON.parse(r) as BufferEntry; } catch { return { text: r }; } })
     .reverse(); // buffer is LIFO (LPUSH+RPOP), reverse to chronological
 
-  // Consolidate text content
+  // Consolidate text content. In GROUPS, prefix each line with the sender's name so the agent
+  // knows who said what (critical for "respond to all" shared threads; also lets it address the
+  // person by name in per-member threads). Individual chats are left unlabeled.
+  const isGroupBuf = String(entries[entries.length - 1]?.contactJid ?? '').endsWith('@g.us');
   const textParts = entries
-    .map(e => e.text?.trim())
+    .map(e => {
+      const t = e.text?.trim();
+      if (!t) return null;
+      return isGroupBuf ? `${e.senderName || e.senderPhone || 'Participante'}: ${t}` : t;
+    })
     .filter((t): t is string => !!t);
   const consolidatedText = textParts.join('\n');
 
@@ -225,14 +232,6 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     return;
   }
 
-  // Recompute keys using JID when available — unifies Evolution + Chatwoot paths.
-  // Groups get a per-member session scope so each group contact keeps its own history.
-  const jidKey = contactJid ? contactJid.replace(/[^a-z0-9]/gi, '_') : '';
-  const isGroupConv = contactJid.endsWith('@g.us');
-  const sessionScope = isGroupConv && senderPhone ? `${jidKey}_${senderPhone}` : jidKey;
-  const activeSessionKey = sessionScope ? `sessao:t:${tenantId}:${agentId}:${sessionScope}` : sessionKey;
-  const activeTakeoverKey = jidKey ? `human_takeover:t:${tenantId}:${agentId}:${jidKey}` : takeoverKey;
-
   // Load agent config + tenant Chatwoot credentials (needed before mirroring).
   const db = await getDb();
   const agentDoc = await db.collection<AgentDoc>('agents').findOne({ _id: agentId, tenantId })
@@ -241,6 +240,19 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     console.error(`[debounce] Agent not found: agentId=${agentId} tenantId=${tenantId}`);
     return;
   }
+
+  // Recompute keys using JID when available — unifies Evolution + Chatwoot paths.
+  // Groups keep history PER MEMBER (each contact has its own thread), EXCEPT "respond to all"
+  // groups, where the bot follows the whole group as one shared thread (must match the webhook's
+  // convKey choice). respondToAll defaults false (per-field, tolerates old/partial groupConfig).
+  const jidKey = contactJid ? contactJid.replace(/[^a-z0-9]/gi, '_') : '';
+  const isGroupConv = contactJid.endsWith('@g.us');
+  const groupRespondToAll = agentDoc.groupConfig?.respondToAll ?? false;
+  const sessionScope = isGroupConv
+    ? (groupRespondToAll || !senderPhone ? jidKey : `${jidKey}_${senderPhone}`)
+    : jidKey;
+  const activeSessionKey = sessionScope ? `sessao:t:${tenantId}:${agentId}:${sessionScope}` : sessionKey;
+  const activeTakeoverKey = jidKey ? `human_takeover:t:${tenantId}:${agentId}:${jidKey}` : takeoverKey;
   const tenantDoc = await db.collection<TenantDoc>('tenants').findOne({ _id: tenantId });
   const cwAccountId = tenantDoc?.chatwoot?.accountId?.toString() ?? agentDoc.chatwootAccountId ?? '';
   const cwApiKey = tenantDoc?.chatwoot?.apiKey ?? '';

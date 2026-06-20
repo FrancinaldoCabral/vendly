@@ -503,6 +503,9 @@ export async function handleEvolutionMessageWebhook(
     // ── EARLY group gate (before any media download/transcription = no wasted cost) ──
     const reply = extractReplyContext(message);
     let bufWaExternalId: string | null = reply.stanzaId ?? null;
+    // In "respond to all" groups the bot is a participant in the WHOLE conversation → shared thread.
+    // Otherwise history is isolated PER participant (each member has their own thread with the bot).
+    let groupRespondToAll = false;
     if (isGroup) {
       // Default per-field: an old/partial groupConfig (e.g. {} from a pre-schema agent) must still
       // respond to mentions/replies. An explicitly-set false is respected (false ?? true = false).
@@ -512,6 +515,7 @@ export async function handleEvolutionMessageWebhook(
         respondToReplies: rawGc.respondToReplies ?? true,
         respondToAll: rawGc.respondToAll ?? false,
       };
+      groupRespondToAll = gc.respondToAll ?? false;
       // The bot can be addressed by its phone OR by a WhatsApp @lid. Match against both: the phone
       // from Evolution plus any group identities learned from the bot's own messages.
       const botPhone = await getAgentPhone(instance);
@@ -599,9 +603,10 @@ export async function handleEvolutionMessageWebhook(
       }
     }
 
-    // Conversation key: per-contact for direct chats, per-group-member for groups
+    // Conversation key: per-contact for direct chats; for groups, per-member (isolated history) —
+    // EXCEPT "respond to all" groups, where the bot follows the whole group as one shared thread.
     const groupSan = jid.replace(/[^a-z0-9]/gi, '_');
-    const convKey = isGroup ? `${groupSan}_${senderPhone}` : groupSan;
+    const convKey = isGroup ? (groupRespondToAll ? groupSan : `${groupSan}_${senderPhone}`) : groupSan;
     const bufferKey = `buffer:t:${tenantId}:ev:${convKey}`;
 
     const entry = JSON.stringify({
