@@ -16,10 +16,15 @@ export interface GroupFilterInput {
   /** waExternalId present → this message is a reply to a specific prior message */
   waExternalId?: string | null;
   agentPhone?: string | null;
+  /** All known identities of the bot (phone + any @lid). Preferred over agentPhone. */
+  agentPhones?: string[];
   senderPhone?: string | null;
   /** Phone numbers from the message's contextInfo.mentionedJid — the AUTHORITATIVE mention source
    *  (WhatsApp puts @mentions here, not always as @<number> in the visible text). */
   mentionedPhones?: string[];
+  /** When we don't yet know the bot's @lid, treat ANY mention as targeting it (bootstrap). The bot's
+   *  first reply teaches us its lid and this turns off, so mentions become precise. */
+  lenientMention?: boolean;
   groupConfig: GroupConfig;
 }
 
@@ -33,7 +38,10 @@ export interface GroupFilterResult {
  * Always passes for non-group JIDs.
  */
 export function groupFilter(input: GroupFilterInput): GroupFilterResult {
-  const { jid, messageText, waExternalId, agentPhone, groupConfig } = input;
+  const { jid, messageText, waExternalId, groupConfig } = input;
+  const agentPhones = (input.agentPhones && input.agentPhones.length)
+    ? input.agentPhones
+    : (input.agentPhone ? [input.agentPhone] : []);
 
   // Not a group — always pass
   if (!jid.endsWith('@g.us')) {
@@ -56,15 +64,13 @@ export function groupFilter(input: GroupFilterInput): GroupFilterResult {
       ? input.mentionedPhones
       : extractMentions(messageText);
 
-    if (agentPhone) {
-      // We know the bot's number — pass ONLY when the bot itself is mentioned.
-      const mentionedAgent = mentions.some(p =>
-        p === agentPhone || agentPhone.endsWith(p) || p.endsWith(agentPhone)
-      );
-      if (mentionedAgent) return { pass: true, reason: `agent mentioned (@${agentPhone})` };
-    } else if (mentions.length > 0) {
-      // Bot number not resolved — best effort: any mention passes.
-      return { pass: true, reason: `mention detected (agentPhone not resolved)` };
+    const mentionedAgent = agentPhones.length > 0 && mentions.some(p =>
+      agentPhones.some(b => p === b || b.endsWith(p) || p.endsWith(b))
+    );
+    if (mentionedAgent) return { pass: true, reason: `agent mentioned` };
+    // Bot @lid not resolved yet (or no identities) — any mention passes as a bootstrap.
+    if ((input.lenientMention || agentPhones.length === 0) && mentions.length > 0) {
+      return { pass: true, reason: `mention detected (bot id not resolved — lenient)` };
     }
   }
 

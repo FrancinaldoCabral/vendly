@@ -363,6 +363,33 @@ export async function getAgentPhone(instance: string): Promise<string | null> {
   } catch { return null; }
 }
 
+const agentIdCache = new Map<string, string[]>();
+
+/**
+ * All known identities of the bot's own account for an instance: its phone AND any WhatsApp @lid.
+ * We scan the whole instance object because Evolution exposes the lid under different keys across
+ * versions. Used to detect @mentions / replies addressed to the bot in groups (WhatsApp now uses
+ * @lid, not the phone number, when mentioning).
+ */
+export async function getAgentIdentities(instance: string): Promise<string[]> {
+  if (agentIdCache.has(instance)) return agentIdCache.get(instance)!;
+  try {
+    const r = await fetch(`${config.evolution.url}/instance/fetchInstances`, {
+      headers: { apikey: config.evolution.apiKey, 'Content-Type': 'application/json' },
+    });
+    if (!r.ok) return [];
+    const data = await r.json() as Array<{ name?: string }>;
+    const inst = data.find(d => d.name === instance);
+    if (!inst) return [];
+    const blob = JSON.stringify(inst);
+    const ids = new Set<string>();
+    for (const m of blob.matchAll(/(\d{6,})@(?:s\.whatsapp\.net|lid|c\.us)/g)) ids.add(m[1]);
+    const list = [...ids];
+    if (list.length) agentIdCache.set(instance, list);
+    return list;
+  } catch { return []; }
+}
+
 // ── buscar_memoria (RAG) ─────────────────────────────────────────────────────
 
 async function executeBuscarMemoria(

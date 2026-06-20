@@ -11,7 +11,7 @@ import { getRedis } from '../tools/redis.js';
 import { getDb } from '../tools/mongodb.js';
 import { scheduleDebounce, resolveOrCreateConversation, postChatwootMessage, postChatwootNote } from './debounce.js';
 import { groupFilter, type GroupConfig } from './group-filter.js';
-import { getAgentPhone } from './agent-loop.js';
+import { getAgentPhone, getAgentIdentities } from './agent-loop.js';
 import {
   classifyEvolutionMedia,
   fetchEvolutionMediaBase64,
@@ -429,9 +429,21 @@ export async function handleEvolutionMessageWebhook(
 
   for (const msg of rawMsgs) {
     const key = (msg.key ?? {}) as Record<string, unknown>;
-    if (key.fromMe) continue; // skip our own outgoing messages
+    const jidEarly = String(key.remoteJid ?? '');
+    if (key.fromMe) {
+      // Learn the bot's OWN identity inside groups (phone or @lid) from its outgoing messages, so
+      // we can recognize @mentions / replies addressed to it (WhatsApp uses @lid, not the phone).
+      if (jidEarly.endsWith('@g.us') && key.participant) {
+        const botId = String(key.participant).replace(/@[^@]+$/, '').replace(/\D/g, '');
+        if (botId) {
+          await redis.sadd(`bot_ids:${instance}`, botId);
+          await redis.expire(`bot_ids:${instance}`, 60 * 60 * 24 * 60);
+        }
+      }
+      continue; // skip our own outgoing messages
+    }
 
-    const jid = String(key.remoteJid ?? '');
+    const jid = jidEarly;
     if (!jid || jid === 'status@broadcast' || jid.endsWith('@broadcast')) continue;
 
     const msgId = String(key.id ?? '');
@@ -470,21 +482,36 @@ export async function handleEvolutionMessageWebhook(
     const reply = extractReplyContext(message);
     let bufWaExternalId: string | null = reply.stanzaId ?? null;
     if (isGroup) {
-      const gc: GroupConfig = owner.groupConfig ?? { respondToMentions: true, respondToReplies: true, respondToAll: false };
+      // Default per-field: an old/partial groupConfig (e.g. {} from a pre-schema agent) must still
+      // respond to mentions/replies. An explicitly-set false is respected (false ?? true = false).
+      const rawGc = (owner.groupConfig ?? {}) as Partial<GroupConfig>;
+      const gc: GroupConfig = {
+        respondToMentions: rawGc.respondToMentions ?? true,
+        respondToReplies: rawGc.respondToReplies ?? true,
+        respondToAll: rawGc.respondToAll ?? false,
+      };
+      // The bot can be addressed by its phone OR by a WhatsApp @lid. Match against both: the phone
+      // from Evolution plus any group identities learned from the bot's own messages.
       const botPhone = await getAgentPhone(instance);
+      const fromInstance = await getAgentIdentities(instance);
+      const learned = await redis.smembers(`bot_ids:${instance}`).catch(() => [] as string[]);
+      const botIds = [...new Set([botPhone, ...fromInstance, ...learned].filter((x): x is string => !!x))];
+      // Do we know a @lid (anything beyond the plain phone)? If not, fall back to lenient mention.
+      const haveLid = botIds.some(id => id !== botPhone);
+      const idMatches = (p: string) => botIds.some(b => p === b || b.endsWith(p) || p.endsWith(b));
       const replyParticipant = (reply.participant ?? '').replace(/@[^@]+$/, '').replace(/\D/g, '');
       // A reply counts toward "respondToReplies" only if it replies to the BOT's message.
       const replyToBot = !!reply.stanzaId && (
-        !botPhone || !replyParticipant ||
-        replyParticipant === botPhone || botPhone.endsWith(replyParticipant) || replyParticipant.endsWith(botPhone)
+        botIds.length === 0 || !replyParticipant || idMatches(replyParticipant)
       );
       const gate = groupFilter({
         jid,
         messageText: cheapText(message), // text only — audio NOT transcribed yet
         waExternalId: replyToBot ? reply.stanzaId : null,
-        agentPhone: botPhone,
+        agentPhones: botIds,
         senderPhone,
         mentionedPhones: extractMentionedPhones(message),
+        lenientMention: !haveLid,
         groupConfig: gc,
       });
       if (!gate.pass) {
