@@ -111,6 +111,7 @@ async function runPostPipeline(post: ScheduledPost): Promise<void> {
   // Post to all targets
   const text = String(context.finalText ?? context.composedText ?? context.searchResult ?? '');
   const imageUrl = String(context.imageUrl ?? '');
+  console.log(`[scheduler] post=${post._id} text=${text.length}chars image=${imageUrl ? 'yes' : 'no'} targets=${post.targets.length}`);
 
   for (const target of post.targets) {
     await sendToTarget(post.agentId, target, text, imageUrl);
@@ -233,10 +234,12 @@ async function generateImage(prompt: string, _agentId: string): Promise<string> 
       }),
     });
     const raw = await r.text();
-    if (!r.ok) { console.error(`[scheduler] Image gen ${r.status}: ${raw.slice(0, 200)}`); return ''; }
+    if (!r.ok) { console.error(`[scheduler] Image gen ${r.status}: ${raw.slice(0, 250)}`); return ''; }
     let data: { choices?: Array<{ message?: { images?: Array<{ image_url?: { url?: string } }> } }> };
     try { data = JSON.parse(raw); } catch { console.error('[scheduler] Image gen: non-JSON response'); return ''; }
-    return data.choices?.[0]?.message?.images?.[0]?.image_url?.url ?? '';
+    const url = data.choices?.[0]?.message?.images?.[0]?.image_url?.url ?? '';
+    console.log(`[scheduler] Image gen (${config.openrouter.imageModel}): ${url ? `ok (${url.slice(0, 24)}…)` : 'no image returned'}`);
+    return url;
   } catch (e) {
     console.error(`[scheduler] Image gen failed:`, String(e));
     return '';
@@ -269,32 +272,38 @@ async function sendToTarget(
   }
 }
 
+async function evoPost(instance: string, endpoint: string, body: Record<string, unknown>, label: string): Promise<void> {
+  try {
+    const r = await fetch(`${config.evolution.url}/message/${endpoint}/${instance}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
+      body: JSON.stringify(body),
+    });
+    const txt = await r.text();
+    console.log(`[scheduler] ${label} → ${r.status} ${txt.slice(0, 160)}`);
+  } catch (e) {
+    console.error(`[scheduler] ${label} failed:`, String(e));
+  }
+}
+
 async function sendEvolutionText(instance: string, jid: string, text: string): Promise<void> {
-  await fetch(`${config.evolution.url}/message/sendText/${instance}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
-    body: JSON.stringify({ number: jid, text }),
-  });
+  await evoPost(instance, 'sendText', { number: jid, text }, `sendText ${jid}`);
 }
 
 async function sendEvolutionMedia(instance: string, jid: string, caption: string, mediaUrl: string): Promise<void> {
   // Evolution accepts a public URL or raw base64. Generated images come as a data URL → strip prefix.
   const media = mediaUrl.startsWith('data:') ? mediaUrl.replace(/^data:[^;]+;base64,/, '') : mediaUrl;
-  await fetch(`${config.evolution.url}/message/sendMedia/${instance}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
-    body: JSON.stringify({ number: jid, mediatype: 'image', media, caption }),
-  });
+  await evoPost(instance, 'sendMedia', { number: jid, mediatype: 'image', media, caption }, `sendMedia ${jid}`);
 }
 
 async function sendEvolutionStatus(instance: string, text: string, mediaUrl: string): Promise<void> {
-  const payload: Record<string, unknown> = { type: mediaUrl ? 'image' : 'text', content: mediaUrl || text };
-  if (mediaUrl && text) payload.caption = text;
-  await fetch(`${config.evolution.url}/message/sendStatus/${instance}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
-    body: JSON.stringify(payload),
-  });
+  // WhatsApp Status broadcast. Evolution requires the audience (allContacts) and, for text,
+  // a background color + font. Media goes as a URL or base64.
+  const media = mediaUrl.startsWith('data:') ? mediaUrl.replace(/^data:[^;]+;base64,/, '') : mediaUrl;
+  const payload: Record<string, unknown> = media
+    ? { type: 'image', content: media, caption: text || undefined, allContacts: true }
+    : { type: 'text', content: text, backgroundColor: '#0d9488', font: 1, allContacts: true };
+  await evoPost(instance, 'sendStatus', payload, 'sendStatus');
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
