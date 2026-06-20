@@ -110,18 +110,50 @@ export interface WcSubscriptionResult {
 export async function checkWcSubscription(email: string): Promise<WcSubscriptionResult> {
   const { url, consumerKey, consumerSecret, subscriptionProductId } = config.woocommerce;
   if (!url || !consumerKey || !consumerSecret) {
-    console.warn('[provisioning] WooCommerce credentials not configured — granting access');
-    return { hasAccess: true };
+    // Fail CLOSED: the subscription gate must never grant access when it isn't configured.
+    console.error('[provisioning] WooCommerce credentials not configured — DENYING access (set WC_URL / WC_CONSUMER_KEY / WC_CONSUMER_SECRET)');
+    return { hasAccess: false };
   }
 
+  const base = url.replace(/\/$/, '');
   const base64 = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
   const headers = { Authorization: `Basic ${base64}`, 'Content-Type': 'application/json' };
+  const wantEmail = email.trim().toLowerCase();
 
   try {
-    // Fetch active subscriptions for this email
-    const params = new URLSearchParams({ email, status: 'active', per_page: '50' });
-    const r = await fetch(`${url.replace(/\/$/, '')}/wp-json/wc/v1/subscriptions?${params}`, { headers });
+    // 1. Resolve the WordPress/WooCommerce user for THIS email. role=all is REQUIRED: the
+    //    customers endpoint defaults to role=customer, so active subscribers (whose role is
+    //    `subscriber`) would otherwise not be returned at all.
+    const cr = await fetch(`${base}/wp-json/wc/v3/customers?role=all&email=${encodeURIComponent(wantEmail)}`, { headers });
+    let customerId: number | undefined;
+    let customerName: string | undefined;
+    let role = '';
+    if (cr.ok) {
+      const customers = await cr.json() as Array<{ id: number; email?: string; role?: string; first_name?: string; last_name?: string }>;
+      const c = (Array.isArray(customers) ? customers : []).find(x => (x.email ?? '').trim().toLowerCase() === wantEmail);
+      customerId = c?.id;
+      role = (c?.role ?? '').toLowerCase();
+      customerName = c ? [c.first_name, c.last_name].filter(Boolean).join(' ') : undefined;
+    } else {
+      console.error(`[provisioning] WC customer lookup failed: ${cr.status}`);
+    }
+    if (!customerId) {
+      console.warn(`[provisioning] no WordPress user for ${wantEmail} — denying access`);
+      return { hasAccess: false };
+    }
 
+    // 2. Only ACTIVE subscribers pass. WooCommerce Subscriptions sets the role to `subscriber`
+    //    while a subscription is active and reverts it to `customer` when it lapses/cancels.
+    //    A plain `customer` (bought something, but no active subscription) must NOT get access.
+    if (role !== 'subscriber') {
+      console.warn(`[provisioning] ${wantEmail} role="${role || 'none'}" is not an active subscriber — denying access`);
+      return { hasAccess: false };
+    }
+
+    // 3. Confirm the active subscription is for the product configured in the env vars (the store
+    //    may sell more than one subscription product).
+    const params = new URLSearchParams({ customer: String(customerId), status: 'active', per_page: '50' });
+    const r = await fetch(`${base}/wp-json/wc/v1/subscriptions?${params}`, { headers });
     if (!r.ok) {
       console.error(`[provisioning] WC subscriptions check failed: ${r.status}`);
       return { hasAccess: false };
@@ -130,19 +162,25 @@ export async function checkWcSubscription(email: string): Promise<WcSubscription
     type WcSubscription = {
       id: number;
       customer_id: number;
+      status?: string;
       line_items: { product_id: number }[];
-      billing: { first_name?: string; last_name?: string };
+      billing: { first_name?: string; last_name?: string; email?: string };
     };
 
     const subs = await r.json() as WcSubscription[];
-    const match = subs.find(s =>
+    const match = (Array.isArray(subs) ? subs : []).find(s =>
+      s.customer_id === customerId &&
+      (s.status ?? 'active') === 'active' &&
       s.line_items.some(li => li.product_id === subscriptionProductId)
     );
 
-    if (!match) return { hasAccess: false };
+    if (!match) {
+      console.warn(`[provisioning] customer ${customerId} (${wantEmail}) has no active subscription for product ${subscriptionProductId} — denying access`);
+      return { hasAccess: false };
+    }
 
-    const wcUserName = [match.billing.first_name, match.billing.last_name].filter(Boolean).join(' ') || email;
-    return { hasAccess: true, wcUserId: match.customer_id, wcUserName };
+    const wcUserName = [match.billing?.first_name, match.billing?.last_name].filter(Boolean).join(' ') || customerName || wantEmail;
+    return { hasAccess: true, wcUserId: customerId, wcUserName };
   } catch (e) {
     console.error('[provisioning] WC subscription check error:', String(e));
     return { hasAccess: false };
