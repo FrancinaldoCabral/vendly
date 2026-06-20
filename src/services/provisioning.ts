@@ -508,23 +508,10 @@ export async function deprovisionAgent(agentId: string, tenantId: string): Promi
   // 2. Remove the agent doc
   await db.collection<AgentDoc>('agents').deleteOne(filter);
 
-  // 3. Tear down the WhatsApp connection ONLY if no other agent still uses it.
-  const connId = (agent as { connectionId?: string }).connectionId;
-  const sharedQuery: Record<string, unknown> = connId
-    ? { connectionId: connId }
-    : { evolutionInstance: agent.evolutionInstance };
-  const remaining = await db.collection<AgentDoc>('agents').countDocuments(sharedQuery);
-  if (remaining === 0) {
-    await teardownEvolutionAndInbox(agent.evolutionInstance, agent.chatwootInboxId, agent.tenantId);
-    if (connId) {
-      await db.collection<ConnectionDoc>('connections').deleteOne({ _id: connId });
-    }
-    console.log(`[provisioning] Connection torn down (last agent): instance=${agent.evolutionInstance}`);
-  } else {
-    console.log(`[provisioning] Connection kept (${remaining} agent(s) remain): instance=${agent.evolutionInstance}`);
-  }
-
-  console.log(`[provisioning] Agent deprovisioned: ${agentId} instance=${agent.evolutionInstance}`);
+  // 3. The WhatsApp connection belongs to the negócio and is INDEPENDENT of the agent — deleting
+  //    an agent never disconnects WhatsApp. The number stays connected and can take a new agent.
+  //    The connection (Evolution instance + Chatwoot inbox) is only removed via deprovisionConnection.
+  console.log(`[provisioning] Agent deprovisioned: ${agentId} (connection kept) instance=${agent.evolutionInstance}`);
 }
 
 /** Delete a connection and its underlying Evolution instance + Chatwoot inbox (and detach agents). */

@@ -5,7 +5,7 @@ import {
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, QrcodeOutlined, ReloadOutlined, WhatsAppOutlined,
-  RobotOutlined, EditOutlined,
+  RobotOutlined, EditOutlined, PauseCircleOutlined, PlayCircleOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
@@ -150,6 +150,12 @@ export default function Connections() {
     onError: (e: Error) => message.error(e.message),
   });
 
+  const toggleAgent = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: 'active' | 'paused' }) => api.updateAgent(id, { status }),
+    onSuccess: (_r, v) => { qc.invalidateQueries({ queryKey: ['agents'] }); message.success(v.status === 'paused' ? 'Agente pausado — parou de responder.' : 'Agente reativado.'); },
+    onError: (e: Error) => message.error(e.message),
+  });
+
   const openAddAgent = (conn: Connection) => { setEditAgent(null); setAgentConn(conn); setAgentModalOpen(true); };
   const openEditAgent = (conn: Connection, a: Agent) => { setEditAgent(a); setAgentConn(conn); setAgentModalOpen(true); };
 
@@ -235,8 +241,16 @@ export default function Connections() {
                                 : <Tag style={{ fontSize: 11 }}>Atende todos</Tag>}
                           </div>
                         </div>
+                        {a.status === 'paused' ? (
+                          <Button size="small" type="primary" ghost icon={<PlayCircleOutlined />} loading={toggleAgent.isPending}
+                            onClick={() => toggleAgent.mutate({ id: a._id, status: 'active' })}>Retomar</Button>
+                        ) : (
+                          <Button size="small" icon={<PauseCircleOutlined />} loading={toggleAgent.isPending}
+                            disabled={a.status === 'pending_qr'}
+                            onClick={() => toggleAgent.mutate({ id: a._id, status: 'paused' })}>Pausar</Button>
+                        )}
                         <Button size="small" icon={<EditOutlined />} onClick={() => openEditAgent(conn, a)}>Editar</Button>
-                        <Popconfirm title={`Remover agente "${a.name}"?`} description="Remove o agente e sua base de conhecimento." onConfirm={() => delAgent.mutate(a._id)} okText="Remover" okButtonProps={{ danger: true }}>
+                        <Popconfirm title={`Remover agente "${a.name}"?`} description="Remove o agente e sua base de conhecimento. O WhatsApp continua conectado." onConfirm={() => delAgent.mutate(a._id)} okText="Remover" okButtonProps={{ danger: true }}>
                           <Button size="small" danger icon={<DeleteOutlined />} />
                         </Popconfirm>
                       </div>

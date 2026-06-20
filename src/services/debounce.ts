@@ -7,7 +7,7 @@ import { getRedis } from '../tools/redis.js';
 import { getDb } from '../tools/mongodb.js';
 import { config } from '../config.js';
 import { agentLoop, type AgentLoopContext, type OpenRouterMessage } from './agent-loop.js';
-import { groupFilter, type GroupConfig } from './group-filter.js';
+import { type GroupConfig } from './group-filter.js';
 import { generateTts, buildMediaContentPart, type MediaKind } from './media.js';
 import { CATALOG_BY_ID, type AssetKind } from './tool-catalog.js';
 
@@ -265,21 +265,10 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     return;
   }
 
-  // Group filter (only applies to @g.us JIDs)
-  if (isGroupConv && agentDoc.groupConfig) {
-    const filterResult = groupFilter({
-      jid: contactJid,
-      messageText: consolidatedText,
-      waExternalId,
-      agentPhone: null, // resolved by filter internally if needed
-      senderPhone,
-      groupConfig: agentDoc.groupConfig,
-    });
-    if (!filterResult.pass) {
-      console.log(`[debounce] SKIP group filter: ${filterResult.reason}`);
-      return;
-    }
-  }
+  // NOTE: group filtering (mentions / replies / respondToAll) is done UPSTREAM in the Evolution
+  // webhook, where the raw message (contextInfo.mentionedJid + reply context) is available. We do
+  // NOT re-filter here — by this point we only have consolidated text and would lose the mention
+  // info, causing valid group messages to be wrongly dropped.
 
   // Load session history from Redis (use JID-based key for unified history across both paths)
   const sessionRaw = await redis.get(activeSessionKey);

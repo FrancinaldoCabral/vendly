@@ -54,6 +54,23 @@ function extractReplyContext(message: Record<string, unknown>): { stanzaId?: str
   return {};
 }
 
+/** Phone numbers mentioned in a message (contextInfo.mentionedJid) — the authoritative @mention
+ *  source on WhatsApp. Checks every message type that can carry a contextInfo. */
+function extractMentionedPhones(message: Record<string, unknown>): string[] {
+  const found = new Set<string>();
+  const collect = (ci: unknown) => {
+    const arr = (ci as Record<string, unknown> | undefined)?.mentionedJid;
+    if (Array.isArray(arr)) for (const j of arr) {
+      const p = String(j).replace(/@[^@]+$/, '').replace(/\D/g, '');
+      if (p) found.add(p);
+    }
+  };
+  const types = ['extendedTextMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage'];
+  for (const t of types) collect((message[t] as Record<string, unknown> | undefined)?.contextInfo);
+  collect((message as Record<string, unknown>).contextInfo);
+  return [...found];
+}
+
 /** Plain text from a message WITHOUT downloading/transcribing media (cheap, for the early gate). */
 function cheapText(message: Record<string, unknown>): string {
   const ext = (message.extendedTextMessage as Record<string, unknown> | undefined)?.text;
@@ -467,6 +484,7 @@ export async function handleEvolutionMessageWebhook(
         waExternalId: replyToBot ? reply.stanzaId : null,
         agentPhone: botPhone,
         senderPhone,
+        mentionedPhones: extractMentionedPhones(message),
         groupConfig: gc,
       });
       if (!gate.pass) {

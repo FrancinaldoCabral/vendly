@@ -17,6 +17,9 @@ export interface GroupFilterInput {
   waExternalId?: string | null;
   agentPhone?: string | null;
   senderPhone?: string | null;
+  /** Phone numbers from the message's contextInfo.mentionedJid — the AUTHORITATIVE mention source
+   *  (WhatsApp puts @mentions here, not always as @<number> in the visible text). */
+  mentionedPhones?: string[];
   groupConfig: GroupConfig;
 }
 
@@ -30,7 +33,7 @@ export interface GroupFilterResult {
  * Always passes for non-group JIDs.
  */
 export function groupFilter(input: GroupFilterInput): GroupFilterResult {
-  const { jid, messageText, waExternalId, agentPhone, senderPhone, groupConfig } = input;
+  const { jid, messageText, waExternalId, agentPhone, groupConfig } = input;
 
   // Not a group — always pass
   if (!jid.endsWith('@g.us')) {
@@ -42,49 +45,32 @@ export function groupFilter(input: GroupFilterInput): GroupFilterResult {
     return { pass: true, reason: 'respondToAll enabled' };
   }
 
-  // Reply check: message has a reply context (waExternalId present)
+  // Reply check: message has a reply context (waExternalId present → reply to the bot's message)
   if (groupConfig.respondToReplies && waExternalId) {
     return { pass: true, reason: `reply detected (waExternalId=${waExternalId})` };
   }
 
-  // Mention check: @agentPhone appears in text
+  // Mention check. Prefer the authoritative mentionedJid phones; fall back to @<number> in text.
   if (groupConfig.respondToMentions) {
-    const mentions = extractMentions(messageText);
+    const mentions = (input.mentionedPhones && input.mentionedPhones.length)
+      ? input.mentionedPhones
+      : extractMentions(messageText);
 
     if (agentPhone) {
-      // Layer 1: agentPhone present, check exact/suffix match
+      // We know the bot's number — pass ONLY when the bot itself is mentioned.
       const mentionedAgent = mentions.some(p =>
         p === agentPhone || agentPhone.endsWith(p) || p.endsWith(agentPhone)
       );
-      if (mentionedAgent) {
-        return { pass: true, reason: `agent mentioned (@${agentPhone})` };
-      }
-
-      // Layer 2: any mention that is not the sender themselves
-      if (senderPhone) {
-        const mentionedNonSender = mentions.some(p =>
-          p !== senderPhone && !senderPhone.endsWith(p) && !p.endsWith(senderPhone)
-        );
-        if (mentionedNonSender) {
-          return { pass: true, reason: `non-sender mention detected` };
-        }
-      } else {
-        // Layer 3: unknown sender, any mention passes
-        if (mentions.length > 0) {
-          return { pass: true, reason: `mention detected (sender unknown)` };
-        }
-      }
-    } else {
-      // agentPhone not resolved — fall back to any mention
-      if (mentions.length > 0) {
-        return { pass: true, reason: `mention detected (agentPhone not resolved)` };
-      }
+      if (mentionedAgent) return { pass: true, reason: `agent mentioned (@${agentPhone})` };
+    } else if (mentions.length > 0) {
+      // Bot number not resolved — best effort: any mention passes.
+      return { pass: true, reason: `mention detected (agentPhone not resolved)` };
     }
   }
 
   return {
     pass: false,
-    reason: `group message filtered (respondToMentions=${groupConfig.respondToMentions} respondToReplies=${groupConfig.respondToReplies} waExternalId=${waExternalId ?? 'none'} mentions=${extractMentions(messageText).join(',') || 'none'})`,
+    reason: `group message filtered (respondToMentions=${groupConfig.respondToMentions} respondToReplies=${groupConfig.respondToReplies} waExternalId=${waExternalId ?? 'none'} mentions=${(input.mentionedPhones?.length ? input.mentionedPhones : extractMentions(messageText)).join(',') || 'none'})`,
   };
 }
 
