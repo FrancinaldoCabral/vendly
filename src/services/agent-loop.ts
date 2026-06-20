@@ -65,6 +65,7 @@ export interface AgentAssets {
   files?: { label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }[];
   locations?: { label: string; name: string; address: string; latitude: number; longitude: number }[];
   contacts?: { label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }[];
+  recipients?: { label: string; destination: string; isGroup?: boolean }[]; // notify targets (contact/group)
 }
 
 /** Normalize reactions: tolerate the legacy `string[]` (emoji-only) shape. */
@@ -273,6 +274,22 @@ function buildCatalogCall(
           organization: c.organization ?? '', email: c.email ?? '', url: c.url ?? '',
         }],
       } };
+    }
+    case 'acao_notificar': {
+      // Proactive notification to a PRE-CONFIGURED recipient (NOT the current contact). The LLM
+      // only picks a configured destination by label + writes the text; it can never type a raw
+      // number/JID — so it cannot message arbitrary destinations.
+      const r = (assets?.recipients ?? []).find(x => x.label === args.destinatario);
+      if (!r) return { error: `destinatário "${String(args.destinatario)}" não cadastrado` };
+      const dest = String(r.destination ?? '').trim();
+      if (!dest) return { error: `destinatário "${r.label}" sem destino configurado` };
+      const text = String(args.mensagem ?? '').trim();
+      if (!text) return { error: 'mensagem vazia' };
+      // Group → full @g.us jid as configured; contact → digits@s.whatsapp.net.
+      const target = r.isGroup
+        ? (dest.endsWith('@g.us') ? dest : `${dest.replace(/[^0-9-]/g, '')}@g.us`)
+        : `${dest.replace(/\D/g, '')}@s.whatsapp.net`;
+      return { name: 'evolution_send_text', payload: { instanceName, number: target, text } };
     }
   }
   return { error: 'ação desconhecida' };

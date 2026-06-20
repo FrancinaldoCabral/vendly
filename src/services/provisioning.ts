@@ -88,6 +88,7 @@ export interface AgentDoc {
     files?: Array<{ label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }>;
     locations?: Array<{ label: string; name: string; address: string; latitude: number; longitude: number }>;
     contacts?: Array<{ label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }>;
+    recipients?: Array<{ label: string; destination: string; isGroup?: boolean }>;
   };
   customApis: unknown[];
   groupConfig: { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean };

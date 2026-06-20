@@ -69,6 +69,29 @@ connectionsRouter.delete('/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// GET /api/connections/:id/groups — WhatsApp groups this connection participates in
+// (so the user can pick a group by name for the "notify" action — they don't know group IDs).
+connectionsRouter.get('/:id/groups', async (req, res) => {
+  try {
+    const db = await getDb();
+    const filter = { _id: req.params.id, ...tenantFilter(req) } as Record<string, unknown>;
+    const connection = await db.collection('connections').findOne(filter, { projection: { evolutionInstance: 1 } }) as { evolutionInstance?: string } | null;
+    if (!connection) { res.status(404).json({ error: 'Connection not found' }); return; }
+
+    const evUrl = config.evolution.url.replace(/\/$/, '');
+    const r = await fetch(`${evUrl}/group/fetchAllGroups/${connection.evolutionInstance}?getParticipants=false`, {
+      headers: { apikey: config.evolution.apiKey },
+    });
+    if (!r.ok) { res.json([]); return; }
+    const data = await r.json() as Array<{ id?: string; subject?: string }>;
+    const groups = (Array.isArray(data) ? data : [])
+      .filter(g => g.id?.endsWith('@g.us'))
+      .map(g => ({ id: g.id!, subject: g.subject || g.id! }))
+      .sort((a, b) => a.subject.localeCompare(b.subject));
+    res.json(groups);
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // GET /api/connections/:id/qr — QR code for pairing
 connectionsRouter.get('/:id/qr', async (req, res) => {
   try {

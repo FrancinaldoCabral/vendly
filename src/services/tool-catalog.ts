@@ -8,7 +8,7 @@
  * contact's number, message id, conversation id).
  */
 
-export type AssetKind = 'menus' | 'reactions' | 'stickers' | 'labels' | 'files' | 'locations' | 'contacts';
+export type AssetKind = 'menus' | 'reactions' | 'stickers' | 'labels' | 'files' | 'locations' | 'contacts' | 'recipients';
 
 export interface CatalogTool {
   id: string;            // tool name exposed to the LLM
@@ -137,6 +137,23 @@ export const TOOL_CATALOG: CatalogTool[] = [
       type: 'object',
       required: ['contato'],
       properties: { contato: { type: 'string', description: 'Qual contato enviar (use exatamente um dos rótulos disponíveis)' } },
+    },
+  },
+  {
+    id: 'acao_notificar',
+    label: 'Notificar (avisar) um contato ou grupo',
+    description: 'Envia uma mensagem PROATIVA para um destinatário que você cadastrou (um contato ou um grupo) — NÃO é a resposta para a pessoa que está conversando agora. Use só para AVISAR alguém (ex.: a cozinha, o entregador, um responsável). O destino é sempre um dos cadastrados; você só escolhe o destinatário e escreve a mensagem.',
+    example: 'Um pedido foi confirmado → o agente notifica o grupo "Cozinha": "Novo pedido #123: 2 pizzas".',
+    category: 'Organização',
+    asset: 'recipients',
+    assetParam: 'destinatario',
+    params: {
+      type: 'object',
+      required: ['destinatario', 'mensagem'],
+      properties: {
+        destinatario: { type: 'string', description: 'Para quem avisar (use exatamente um dos rótulos de destinatário cadastrados)' },
+        mensagem: { type: 'string', description: 'O texto do aviso a enviar para esse destinatário.' },
+      },
     },
   },
 ];

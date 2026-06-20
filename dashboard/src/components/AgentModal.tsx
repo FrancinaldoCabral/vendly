@@ -6,7 +6,7 @@ import {
   PlusOutlined, EditOutlined, DeleteOutlined, RobotOutlined, ApiOutlined,
   TeamOutlined, FilterOutlined, ThunderboltOutlined, WhatsAppOutlined, UploadOutlined,
 } from '@ant-design/icons';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import type { Agent, CustomApi, ContactFilter, CatalogTool, AgentAssets } from '../lib/types';
 
@@ -14,11 +14,11 @@ const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
 const EMPTY_FILTER: ContactFilter = { mode: 'blacklist', contacts: [], groups: [] };
-type AssetKind = 'menus' | 'reactions' | 'stickers' | 'labels' | 'files' | 'locations' | 'contacts';
+type AssetKind = 'menus' | 'reactions' | 'stickers' | 'labels' | 'files' | 'locations' | 'contacts' | 'recipients';
 
 /** All configured item labels across every asset kind — used to highlight them in the prompt. */
 function allAssetLabels(a: AgentAssets): string[] {
-  const kinds: AssetKind[] = ['menus', 'reactions', 'stickers', 'labels', 'files', 'locations', 'contacts'];
+  const kinds: AssetKind[] = ['menus', 'reactions', 'stickers', 'labels', 'files', 'locations', 'contacts', 'recipients'];
   const out: string[] = [];
   for (const k of kinds) for (const it of (a[k] ?? []) as Array<{ label?: string }>) if (it.label) out.push(it.label);
   return Array.from(new Set(out));
@@ -36,6 +36,7 @@ function normalizeAssets(a: AgentAssets): AgentAssets {
       ...l, latitude: Number(l.latitude) || 0, longitude: Number(l.longitude) || 0,
     })),
     contacts: (a.contacts ?? []).filter(c => c.label && c.fullName && c.phone),
+    recipients: (a.recipients ?? []).filter(r => r.label && r.destination),
   };
 }
 
@@ -361,7 +362,7 @@ function FileUpload({ onUploaded }: { onUploaded: (url: string, name?: string, m
 }
 
 // Inline editor for an action's pre-configured content.
-function AssetEditor({ kind, assets, onChange }: { kind: AssetKind; assets: AgentAssets; onChange: (a: AgentAssets) => void }) {
+function AssetEditor({ kind, assets, onChange, groups = [] }: { kind: AssetKind; assets: AgentAssets; onChange: (a: AgentAssets) => void; groups?: { id: string; subject: string }[] }) {
   const wrap = { marginTop: 10, paddingTop: 10, borderTop: '1px dashed #d9d9d9' } as const;
 
   // Menus: label + intro + options (rendered as a numbered text list to the client).
@@ -452,6 +453,7 @@ function AssetEditor({ kind, assets, onChange }: { kind: AssetKind; assets: Agen
   const setFields = (i: number, patch: Record<string, unknown>) => update(list.map((it, idx) => idx === i ? { ...it, ...patch } : it));
   const add = () => update([...list, kind === 'files' ? { label: '', url: '', mediatype: 'document' }
     : kind === 'locations' ? { label: '', name: '', address: '', latitude: 0, longitude: 0 }
+    : kind === 'recipients' ? { label: '', destination: '', isGroup: false }
     : { label: '', fullName: '', phone: '' }]);
   const remove = (i: number) => update(list.filter((_, idx) => idx !== i));
   const inp = (i: number, field: string, placeholder: string, flex = 1) => (
@@ -482,6 +484,19 @@ function AssetEditor({ kind, assets, onChange }: { kind: AssetKind; assets: Agen
             {inp(i, 'fullName', 'Nome do contato', 1)}
             {inp(i, 'phone', 'Telefone (+55 31 9…)', 1)}
           </>}
+          {kind === 'recipients' && <>
+            <Select size="small" style={{ width: 110 }} value={list[i].isGroup ? 'group' : 'contact'}
+              onChange={v => setFields(i, { isGroup: v === 'group', destination: '' })}
+              options={[{ value: 'contact', label: 'Contato' }, { value: 'group', label: 'Grupo' }]} />
+            {list[i].isGroup ? (
+              <Select size="small" showSearch optionFilterProp="label" style={{ flex: 2, minWidth: 200 }}
+                placeholder={groups.length ? 'Escolha o grupo' : 'Conecte o WhatsApp para listar grupos'}
+                value={list[i].destination ? String(list[i].destination) : undefined}
+                onChange={v => setField(i, 'destination', v)}
+                notFoundContent={groups.length ? 'Nenhum grupo' : 'Nenhum grupo encontrado'}
+                options={groups.map(g => ({ value: g.id, label: g.subject }))} />
+            ) : inp(i, 'destination', 'Telefone (55319…)', 2)}
+          </>}
           <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => remove(i)} />
         </div>
       ))}
@@ -489,13 +504,20 @@ function AssetEditor({ kind, assets, onChange }: { kind: AssetKind; assets: Agen
       {kind === 'locations' && (
         <div><Text type="secondary" style={{ fontSize: 11 }}>Dica: no Google Maps, clique no local — latitude e longitude aparecem (ex.: -19.93, -43.93).</Text></div>
       )}
+      {kind === 'recipients' && (
+        <div><Text type="secondary" style={{ fontSize: 11 }}>
+          Destinatários que o agente pode avisar proativamente. <b>Contato</b>: telefone com DDI/DDD (ex.: 5531999998888).
+          <b> Grupo</b>: escolha na lista (apenas grupos em que este WhatsApp participa).
+        </Text></div>
+      )}
     </div>
   );
 }
 
-function ActionsCatalog({ value, onChange, catalog, assets, onAssetsChange }: {
+function ActionsCatalog({ value, onChange, catalog, assets, onAssetsChange, groups }: {
   value: string[]; onChange: (v: string[]) => void; catalog: CatalogTool[];
   assets: AgentAssets; onAssetsChange: (a: AgentAssets) => void;
+  groups: { id: string; subject: string }[];
 }) {
   const toggle = (id: string, on: boolean) =>
     onChange(on ? Array.from(new Set([...value, id])) : value.filter(v => v !== id));
@@ -526,7 +548,7 @@ function ActionsCatalog({ value, onChange, catalog, assets, onAssetsChange }: {
                 <div style={{ marginTop: 4 }}><Text style={{ fontSize: 12, color: '#0d9488' }}>💡 {t.example}</Text></div>
               </div>
             </div>
-            {on && t.asset && <AssetEditor kind={t.asset} assets={assets} onChange={onAssetsChange} />}
+            {on && t.asset && <AssetEditor kind={t.asset} assets={assets} onChange={onAssetsChange} groups={groups} />}
           </div>
         );
       })}
@@ -569,6 +591,15 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
   const [filter, setFilter] = useState<ContactFilter>(EMPTY_FILTER);
   const [prompt, setPrompt] = useState('');
   const isEdit = !!agent;
+
+  // Groups this WhatsApp participates in — so the user picks a group by name for "notify"
+  // (they don't know group IDs).
+  const connId = connectionId ?? agent?.connectionId;
+  const { data: groups = [] } = useQuery({
+    queryKey: ['conn-groups', connId],
+    queryFn: () => api.getConnectionGroups(connId!),
+    enabled: open && !!connId,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -686,7 +717,7 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
           {
             key: 'actions',
             label: <span><ThunderboltOutlined /> Ações</span>,
-            children: <ActionsCatalog value={builtinTools} onChange={setBuiltinTools} catalog={catalog} assets={assets} onAssetsChange={setAssets} />,
+            children: <ActionsCatalog value={builtinTools} onChange={setBuiltinTools} catalog={catalog} assets={assets} onAssetsChange={setAssets} groups={groups} />,
           },
           {
             key: 'integrations',

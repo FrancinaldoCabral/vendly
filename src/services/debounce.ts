@@ -43,7 +43,7 @@ SUAS CAPACIDADES (já habilitadas pela plataforma — nunca diga que não conseg
 // Friendly noun for each asset kind, used when listing the configured items per action.
 const ASSET_NOUN: Record<AssetKind, string> = {
   menus: 'menus', reactions: 'reações', stickers: 'figurinhas', labels: 'etiquetas',
-  files: 'arquivos', locations: 'localizações', contacts: 'contatos',
+  files: 'arquivos', locations: 'localizações', contacts: 'contatos', recipients: 'destinatários',
 };
 
 /**
@@ -131,6 +131,7 @@ interface AgentDoc {
     files?: Array<{ label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }>;
     locations?: Array<{ label: string; name: string; address: string; latitude: number; longitude: number }>;
     contacts?: Array<{ label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }>;
+    recipients?: Array<{ label: string; destination: string; isGroup?: boolean }>;
   };
   customApis?: Array<{
     name: string;

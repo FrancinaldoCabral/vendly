@@ -44,9 +44,10 @@ export interface AgentAssets {
   files?: { label: string; url: string; mediatype?: string; mimetype?: string; fileName?: string; caption?: string }[];
   locations?: { label: string; name: string; address: string; latitude: number; longitude: number }[];
   contacts?: { label: string; fullName: string; phone: string; organization?: string; email?: string; url?: string }[];
+  recipients?: { label: string; destination: string; isGroup?: boolean }[];
 }
 
-export type AssetKind = 'menus' | 'reactions' | 'stickers' | 'labels' | 'files' | 'locations' | 'contacts';
+export type AssetKind = 'menus' | 'reactions' | 'stickers' | 'labels' | 'files' | 'locations' | 'contacts' | 'recipients';
 
 export interface CatalogTool {
   id: string;

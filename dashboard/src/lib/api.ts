@@ -47,6 +47,7 @@ export const api = {
   deleteConnection: (id: string) => req<{ ok: boolean }>(`/connections/${id}`, { method: 'DELETE' }),
   getConnectionQr: (id: string) => req<{ base64: string | null; code: string | null }>(`/connections/${id}/qr`),
   getConnectionStatus: (id: string) => req<{ connected: boolean; connectionStatus: string }>(`/connections/${id}/status`),
+  getConnectionGroups: (id: string) => req<{ id: string; subject: string }[]>(`/connections/${id}/groups`),
 
   // Provisioning health (self-service repair of failed onboarding)
   getProvisioningHealth: () =>
