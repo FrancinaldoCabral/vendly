@@ -390,6 +390,16 @@ export async function processBuffer(agentId: string, conversationId: string, ten
     if (i < chunks.length - 1) await sleep(700);
   }
 
+  // Remember the WhatsApp ids the bot just sent, so a GROUP reply to one of them is reliably
+  // detected as "reply to the bot" — independent of @lid participant matching.
+  const realSentIds = [...sentIds, audioSourceId].filter((x): x is string => !!x && !x.startsWith('audio-') && !x.startsWith('text-'));
+  if (realSentIds.length) {
+    try {
+      await redis.sadd(`bot_sent:${instance}`, ...realSentIds);
+      await redis.expire(`bot_sent:${instance}`, 60 * 60 * 24 * 7);
+    } catch { /* non-fatal */ }
+  }
+
   // Mirror the bot's OUTGOING reply to Chatwoot (incoming was already mirrored earlier).
   // source_id makes Chatwoot treat it as already-delivered → no "Failed to send", and (crucially)
   // it stops Chatwoot from re-delivering the message back to WhatsApp via the chatwoot-out webhook.

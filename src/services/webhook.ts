@@ -500,9 +500,11 @@ export async function handleEvolutionMessageWebhook(
       const haveLid = botIds.some(id => id !== botPhone);
       const idMatches = (p: string) => botIds.some(b => p === b || b.endsWith(p) || p.endsWith(b));
       const replyParticipant = (reply.participant ?? '').replace(/@[^@]+$/, '').replace(/\D/g, '');
-      // A reply counts toward "respondToReplies" only if it replies to the BOT's message.
+      // A reply counts as "to the bot" if it quotes a message the bot actually sent (authoritative,
+      // @lid-independent) OR, as a fallback, the quoted author matches a known bot identity.
+      const repliesBotMsg = !!reply.stanzaId && (await redis.sismember(`bot_sent:${instance}`, reply.stanzaId).catch(() => 0)) === 1;
       const replyToBot = !!reply.stanzaId && (
-        botIds.length === 0 || !replyParticipant || idMatches(replyParticipant)
+        repliesBotMsg || idMatches(replyParticipant) || (!haveLid && !replyParticipant)
       );
       const gate = groupFilter({
         jid,
