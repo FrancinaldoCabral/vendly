@@ -229,7 +229,8 @@ async function generateImage(prompt: string, _agentId: string): Promise<string> 
       },
       body: JSON.stringify({
         model: config.openrouter.imageModel,
-        modalities: ['image', 'text'],
+        // recraft-v4.1 only supports the "image" output modality (not "text").
+        modalities: ['image'],
         messages: [{ role: 'user', content: prompt }],
       }),
     });
