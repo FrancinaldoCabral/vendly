@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   Typography, Button, Card, Badge, Space, Modal, Form, Input, Select,
-  Checkbox, Popconfirm, Tag, message, Steps, Collapse, Divider, Alert,
+  Checkbox, Popconfirm, Tag, message, Divider, Alert, Radio,
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, CalendarOutlined, PauseCircleOutlined,
@@ -9,104 +9,65 @@ import {
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import type { ScheduledPost, PipelineStep, PostTarget } from '../lib/types';
+import type { ScheduledPost, PipelineStep, PostTarget, Agent } from '../lib/types';
 import dayjs from 'dayjs';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
 const DAYS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
-const STEP_TYPES = [
-  { value: 'search', label: 'Pesquisa na web' },
-  { value: 'image_gen', label: 'Geração de imagem' },
-  { value: 'fetch_url', label: 'Buscar URL' },
-  { value: 'compose', label: 'Compor com IA' },
-];
+
+const DEFAULT_AI_SYS = 'Você é um criador de conteúdo para WhatsApp. Escreva uma mensagem curta, natural e pronta para enviar (sem títulos, sem aspas). Use emojis com moderação.';
 
 function formatSchedule(s: ScheduledPost['schedule']) {
   const dayStr = s.days.map(d => DAYS[d]).join(', ');
   return `${dayStr} às ${s.time}`;
 }
 
-// ── Pipeline step editor ────────────────────────────────────────────────────
-
-function PipelineEditor({ steps, onChange }: { steps: PipelineStep[]; onChange: (s: PipelineStep[]) => void }) {
-  const add = () => onChange([...steps, { type: 'compose', config: {} }]);
-  const remove = (i: number) => onChange(steps.filter((_, idx) => idx !== i));
-  const setType = (i: number, type: PipelineStep['type']) =>
-    onChange(steps.map((s, idx) => idx === i ? { ...s, type } : s));
-  const setConfig = (i: number, key: string, value: string) =>
-    onChange(steps.map((s, idx) => idx === i ? { ...s, config: { ...s.config, [key]: value } } : s));
-
-  return (
-    <div>
-      {steps.map((step, i) => (
-        <Card key={i} size="small" style={{ marginBottom: 8 }}
-          title={<Space><Text strong>Passo {i + 1}</Text><Select size="small" value={step.type} onChange={t => setType(i, t)} options={STEP_TYPES} style={{ width: 180 }} /></Space>}
-          extra={<Button size="small" danger icon={<DeleteOutlined />} onClick={() => remove(i)} />}
-        >
-          {step.type === 'search' && (
-            <Form.Item label="Pesquisa" style={{ margin: 0 }}>
-              <Input value={String(step.config.query ?? '')} onChange={e => setConfig(i, 'query', e.target.value)} placeholder="Ex: notícias de tecnologia {topic}" />
-            </Form.Item>
-          )}
-          {step.type === 'image_gen' && (
-            <Form.Item label="Prompt da imagem" style={{ margin: 0 }}>
-              <Input value={String(step.config.prompt ?? '')} onChange={e => setConfig(i, 'prompt', e.target.value)} placeholder="Use {searchResult} para incluir resultado anterior" />
-            </Form.Item>
-          )}
-          {step.type === 'fetch_url' && (
-            <Form.Item label="URL" style={{ margin: 0 }}>
-              <Input value={String(step.config.url ?? '')} onChange={e => setConfig(i, 'url', e.target.value)} placeholder="https://api.exemplo.com/dados" />
-            </Form.Item>
-          )}
-          {step.type === 'compose' && (
-            <>
-              <Form.Item label="Instruções do sistema" style={{ marginBottom: 8 }}>
-                <Input value={String(step.config.systemPrompt ?? '')} onChange={e => setConfig(i, 'systemPrompt', e.target.value)} placeholder="Você é um criador de conteúdo para WhatsApp…" />
-              </Form.Item>
-              <Form.Item label="Template do prompt" style={{ margin: 0 }}>
-                <TextArea rows={3} value={String(step.config.prompt ?? '')} onChange={e => setConfig(i, 'prompt', e.target.value)} placeholder="Crie uma postagem sobre {searchResult}. Seja criativo e use emojis." />
-              </Form.Item>
-            </>
-          )}
-        </Card>
-      ))}
-      <Button type="dashed" icon={<PlusOutlined />} onClick={add} block>Adicionar passo</Button>
-    </div>
-  );
+/** Friendly one-line summary of what a post sends (from its pipeline). */
+function contentSummary(p: ScheduledPost): string {
+  const compose = p.pipeline.find(s => s.type === 'compose');
+  const hasImage = p.pipeline.some(s => s.type === 'image_gen');
+  const isFixed = compose && typeof compose.config.static === 'string' && compose.config.static.trim();
+  const base = isFixed ? 'Texto fixo' : compose ? 'Gerado por IA' : 'Conteúdo';
+  return hasImage ? `${base} + imagem` : base;
 }
 
-// ── Target editor ───────────────────────────────────────────────────────────
+// ── Friendly destinations (contact phone / group from a list / status) ───────
 
-function TargetEditor({ targets, onChange }: { targets: PostTarget[]; onChange: (t: PostTarget[]) => void }) {
+function TargetEditor({ targets, onChange, groups }: {
+  targets: PostTarget[]; onChange: (t: PostTarget[]) => void; groups: { id: string; subject: string }[];
+}) {
   const add = () => onChange([...targets, { type: 'contact', jid: '' }]);
   const remove = (i: number) => onChange(targets.filter((_, idx) => idx !== i));
-  const set = (i: number, field: keyof PostTarget, value: string) =>
-    onChange(targets.map((t, idx) => idx === i ? { ...t, [field]: value } : t));
+  const set = (i: number, patch: Partial<PostTarget>) => onChange(targets.map((t, idx) => idx === i ? { ...t, ...patch } : t));
 
   return (
     <div>
       {targets.map((t, i) => (
-        <Space key={i} style={{ display: 'flex', marginBottom: 8 }} align="baseline">
-          <Select
-            value={t.type}
-            onChange={v => set(i, 'type', v)}
-            style={{ width: 110 }}
+        <Space key={i} style={{ display: 'flex', marginBottom: 8 }} align="baseline" wrap>
+          <Select value={t.type} style={{ width: 110 }}
+            onChange={v => set(i, { type: v, jid: '' })}
             options={[
               { value: 'contact', label: 'Contato' },
               { value: 'group', label: 'Grupo' },
               { value: 'status', label: 'Status' },
-            ]}
-          />
-          {t.type !== 'status' && (
-            <Input
-              value={t.jid}
-              onChange={e => set(i, 'jid', e.target.value)}
-              placeholder={t.type === 'group' ? '5511GRUPO@g.us' : '5511999887766@s.whatsapp.net'}
-              style={{ width: 280 }}
-            />
+            ]} />
+          {t.type === 'contact' && (
+            <Input style={{ width: 240 }} placeholder="Telefone (ex.: 5531999998888)"
+              value={t.jid.replace(/@.*/, '').replace(/\D/g, '')}
+              onChange={e => {
+                const d = e.target.value.replace(/\D/g, '');
+                set(i, { jid: d ? `${d}@s.whatsapp.net` : '' });
+              }} />
           )}
+          {t.type === 'group' && (
+            <Select showSearch optionFilterProp="label" style={{ width: 280 }}
+              placeholder={groups.length ? 'Escolha o grupo' : 'Conecte o WhatsApp para listar grupos'}
+              value={t.jid || undefined} onChange={v => set(i, { jid: v })}
+              options={groups.map(g => ({ value: g.id, label: g.subject }))} />
+          )}
+          {t.type === 'status' && <Text type="secondary" style={{ fontSize: 12 }}>Publica no seu Status do WhatsApp</Text>}
           <Button icon={<DeleteOutlined />} size="small" danger onClick={() => remove(i)} />
         </Space>
       ))}
@@ -115,55 +76,73 @@ function TargetEditor({ targets, onChange }: { targets: PostTarget[]; onChange: 
   );
 }
 
-// ── Post Form Modal ─────────────────────────────────────────────────────────
+// ── Post Form Modal (friendly: fixed text or AI, optional image, simple targets) ──
 
-function PostModal({ post, agentId, open, onClose }: { post: ScheduledPost | null; agentId: string; open: boolean; onClose: () => void }) {
+function PostModal({ post, agentId, agents, open, onClose }: {
+  post: ScheduledPost | null; agentId: string; agents: Agent[]; open: boolean; onClose: () => void;
+}) {
   const qc = useQueryClient();
   const [form] = Form.useForm();
-  const [pipeline, setPipeline] = useState<PipelineStep[]>([]);
+  const [contentMode, setContentMode] = useState<'fixed' | 'ai'>('fixed');
+  const [fixedText, setFixedText] = useState('');
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [withImage, setWithImage] = useState(false);
+  const [imagePrompt, setImagePrompt] = useState('');
   const [targets, setTargets] = useState<PostTarget[]>([]);
   const [selectedDays, setSelectedDays] = useState<number[]>([1, 2, 3, 4, 5]);
   const isEdit = !!post;
 
-  const resetForm = () => {
-    if (post) {
-      form.setFieldsValue({ time: post.schedule.time, timezone: post.schedule.timezone ?? 'America/Sao_Paulo' });
-      setSelectedDays(post.schedule.days);
-      setPipeline(post.pipeline);
-      setTargets(post.targets);
-    } else {
-      form.resetFields();
-      form.setFieldsValue({ time: '09:00', timezone: 'America/Sao_Paulo' });
-      setSelectedDays([1, 2, 3, 4, 5]);
-      setPipeline([{ type: 'compose', config: { systemPrompt: 'Você é um criador de conteúdo para WhatsApp.', prompt: 'Crie uma mensagem para o dia {topic}.' } }]);
-      setTargets([]);
-    }
-  };
-
-  const create = useMutation({
-    mutationFn: (vals: Record<string, unknown>) => api.createScheduledPost({
-      agentId,
-      schedule: { days: selectedDays, time: vals.time as string, timezone: vals.timezone as string },
-      pipeline,
-      targets,
-    }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['scheduled_posts'] }); message.success('Postagem agendada!'); onClose(); },
-    onError: (e: Error) => message.error(e.message),
+  // Groups for the agent's WhatsApp, so destinations can be picked by name.
+  const connId = agents.find(a => a._id === agentId)?.connectionId;
+  const { data: groups = [] } = useQuery({
+    queryKey: ['conn-groups', connId], queryFn: () => api.getConnectionGroups(connId!), enabled: open && !!connId,
   });
 
-  const update = useMutation({
-    mutationFn: (vals: Record<string, unknown>) => api.updateScheduledPost(post!._id, {
-      schedule: { days: selectedDays, time: vals.time as string, timezone: vals.timezone as string },
-      pipeline,
-      targets,
-    }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['scheduled_posts'] }); message.success('Postagem atualizada!'); onClose(); },
+  const resetForm = () => {
+    form.setFieldsValue({
+      time: post?.schedule.time ?? '09:00',
+      timezone: post?.schedule.timezone ?? 'America/Sao_Paulo',
+    });
+    setSelectedDays(post?.schedule.days ?? [1, 2, 3, 4, 5]);
+    setTargets(post?.targets ?? []);
+    const compose = post?.pipeline.find(s => s.type === 'compose');
+    const img = post?.pipeline.find(s => s.type === 'image_gen');
+    const staticT = compose && typeof compose.config.static === 'string' ? compose.config.static : '';
+    if (staticT) { setContentMode('fixed'); setFixedText(staticT); setAiPrompt(''); }
+    else if (compose) { setContentMode('ai'); setAiPrompt(String(compose.config.prompt ?? '')); setFixedText(''); }
+    else { setContentMode('fixed'); setFixedText(''); setAiPrompt(''); }
+    setWithImage(!!img);
+    setImagePrompt(img ? String(img.config.prompt ?? '') : '');
+  };
+
+  const buildPipeline = (): PipelineStep[] => {
+    const steps: PipelineStep[] = [];
+    if (contentMode === 'fixed') steps.push({ type: 'compose', config: { static: fixedText.trim() } });
+    else steps.push({ type: 'compose', config: { prompt: aiPrompt.trim(), systemPrompt: DEFAULT_AI_SYS } });
+    if (withImage) steps.push({ type: 'image_gen', config: { prompt: (imagePrompt.trim() || aiPrompt.trim() || fixedText.trim()) } });
+    return steps;
+  };
+
+  const save = useMutation({
+    mutationFn: (vals: Record<string, unknown>) => {
+      const payload = {
+        agentId,
+        schedule: { days: selectedDays, time: vals.time as string, timezone: vals.timezone as string },
+        pipeline: buildPipeline(),
+        targets,
+      };
+      return isEdit ? api.updateScheduledPost(post!._id, payload) : api.createScheduledPost(payload);
+    },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['scheduled_posts'] }); message.success(isEdit ? 'Postagem atualizada!' : 'Postagem agendada!'); onClose(); },
     onError: (e: Error) => message.error(e.message),
   });
 
   const submit = () => {
+    if (contentMode === 'fixed' && !fixedText.trim()) { message.warning('Escreva a mensagem a enviar.'); return; }
+    if (contentMode === 'ai' && !aiPrompt.trim()) { message.warning('Descreva o que a IA deve escrever.'); return; }
+    if (selectedDays.length === 0) { message.warning('Escolha pelo menos um dia.'); return; }
     if (targets.length === 0) { message.warning('Adicione pelo menos um destino.'); return; }
-    form.validateFields().then(vals => { isEdit ? update.mutate(vals as Record<string, unknown>) : create.mutate(vals as Record<string, unknown>); });
+    form.validateFields().then(vals => save.mutate(vals as Record<string, unknown>));
   };
 
   return (
@@ -172,20 +151,44 @@ function PostModal({ post, agentId, open, onClose }: { post: ScheduledPost | nul
       open={open}
       onCancel={onClose}
       onOk={submit}
-      afterOpenChange={open => { if (open) resetForm(); }}
-      confirmLoading={create.isPending || update.isPending}
+      afterOpenChange={o => { if (o) resetForm(); }}
+      confirmLoading={save.isPending}
       okText={isEdit ? 'Salvar' : 'Criar'}
-      width={680}
+      width={640}
       destroyOnClose
     >
-      <Steps size="small" style={{ marginBottom: 24 }} items={[
-        { title: 'Agenda' },
-        { title: 'Pipeline' },
-        { title: 'Destinos' },
-      ]} />
-
       <Form form={form} layout="vertical">
-        <Divider orientation="left">1. Agenda</Divider>
+        <Divider orientation="left">O que enviar</Divider>
+        <Radio.Group value={contentMode} onChange={e => setContentMode(e.target.value)} style={{ marginBottom: 12 }}>
+          <Radio.Button value="fixed">Texto fixo</Radio.Button>
+          <Radio.Button value="ai">Gerar com IA</Radio.Button>
+        </Radio.Group>
+
+        {contentMode === 'fixed' ? (
+          <Form.Item label="Mensagem" style={{ marginBottom: 12 }}>
+            <TextArea rows={4} value={fixedText} onChange={e => setFixedText(e.target.value)}
+              placeholder="Bom dia! ☀️ Hoje temos promoção de…" />
+          </Form.Item>
+        ) : (
+          <Form.Item label="O que a IA deve escrever?" style={{ marginBottom: 12 }}
+            extra="A IA escreve uma mensagem nova a cada envio, seguindo esta orientação.">
+            <TextArea rows={3} value={aiPrompt} onChange={e => setAiPrompt(e.target.value)}
+              placeholder="Uma mensagem de bom dia motivacional e curta para os clientes." />
+          </Form.Item>
+        )}
+
+        <Checkbox checked={withImage} onChange={e => setWithImage(e.target.checked)} style={{ marginBottom: withImage ? 8 : 0 }}>
+          Incluir uma imagem gerada por IA
+        </Checkbox>
+        {withImage && (
+          <Form.Item style={{ marginTop: 8, marginBottom: 0 }}
+            extra="Descreva a imagem. Se deixar vazio, usamos o texto acima como base.">
+            <Input value={imagePrompt} onChange={e => setImagePrompt(e.target.value)}
+              placeholder="Ex.: xícara de café ao nascer do sol, estilo aconchegante" />
+          </Form.Item>
+        )}
+
+        <Divider orientation="left">Quando enviar</Divider>
         <Form.Item label="Dias da semana">
           <Checkbox.Group
             value={selectedDays}
@@ -208,17 +211,11 @@ function PostModal({ post, agentId, open, onClose }: { post: ScheduledPost | nul
           </Form.Item>
         </Space>
 
-        <Divider orientation="left">2. Pipeline de conteúdo</Divider>
+        <Divider orientation="left">Para quem</Divider>
         <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
-          Os passos são executados em sequência. Use {'{'+'variável'+'}'} para referenciar resultados anteriores (ex: {'{'+'searchResult'+'}'}, {'{'+'imageUrl'+'}'}).
+          Contato: digite o telefone. Grupo: escolha na lista. Status: publica no seu Status do WhatsApp.
         </Paragraph>
-        <PipelineEditor steps={pipeline} onChange={setPipeline} />
-
-        <Divider orientation="left">3. Destinos</Divider>
-        <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
-          Defina para quem a postagem será enviada. Use o JID do WhatsApp (ex: 5511999@s.whatsapp.net).
-        </Paragraph>
-        <TargetEditor targets={targets} onChange={setTargets} />
+        <TargetEditor targets={targets} onChange={setTargets} groups={groups} />
       </Form>
     </Modal>
   );
@@ -302,9 +299,7 @@ export default function ScheduledPosts() {
                   <Tag>{p.targets.length} destino{p.targets.length !== 1 ? 's' : ''}</Tag>
                 </div>
                 <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {p.pipeline.map((step, i) => (
-                    <Tag key={i} style={{ fontSize: 11 }}>{STEP_TYPES.find(s => s.value === step.type)?.label ?? step.type}</Tag>
-                  ))}
+                  <Tag style={{ fontSize: 11 }}>{contentSummary(p)}</Tag>
                 </div>
                 {p.lastRun && (
                   <Text type="secondary" style={{ fontSize: 11 }}>
@@ -334,6 +329,7 @@ export default function ScheduledPosts() {
         open={modalOpen}
         post={editPost}
         agentId={editPost?.agentId ?? currentAgentId}
+        agents={agents}
         onClose={() => setModalOpen(false)}
       />
     </div>

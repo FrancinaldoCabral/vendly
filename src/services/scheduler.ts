@@ -144,6 +144,9 @@ async function executePipelineStep(
     }
 
     case 'compose': {
+      // Fixed text: send exactly what the user wrote, no LLM call.
+      const staticText = typeof step.config.static === 'string' ? step.config.static.trim() : '';
+      if (staticText) return { composedText: staticText, finalText: staticText };
       const systemPrompt = String(step.config.systemPrompt ?? 'Você é um assistente criativo.');
       const userPrompt = buildComposePrompt(step.config, context);
       const composed = await callLLM(systemPrompt, userPrompt, agentId);
@@ -214,22 +217,26 @@ async function webSearch(query: string): Promise<string> {
 async function generateImage(prompt: string, _agentId: string): Promise<string> {
   if (!prompt) return '';
   try {
-    // Use OpenRouter with a vision/image model (e.g., black-forest-labs/flux-schnell)
-    const r = await fetch('https://openrouter.ai/api/v1/images/generations', {
+    // OpenRouter generates images through the chat completions API with image modality — there is
+    // NO /images/generations endpoint. The image comes back as a data URL in message.images[].
+    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(60_000),
       headers: {
         'Authorization': `Bearer ${config.openrouter.apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'black-forest-labs/flux-schnell',
-        prompt,
-        n: 1,
+        model: config.openrouter.imageModel,
+        modalities: ['image', 'text'],
+        messages: [{ role: 'user', content: prompt }],
       }),
     });
-    const data = await r.json() as { data?: Array<{ url?: string }> };
-    return data.data?.[0]?.url ?? '';
+    const raw = await r.text();
+    if (!r.ok) { console.error(`[scheduler] Image gen ${r.status}: ${raw.slice(0, 200)}`); return ''; }
+    let data: { choices?: Array<{ message?: { images?: Array<{ image_url?: { url?: string } }> } }> };
+    try { data = JSON.parse(raw); } catch { console.error('[scheduler] Image gen: non-JSON response'); return ''; }
+    return data.choices?.[0]?.message?.images?.[0]?.image_url?.url ?? '';
   } catch (e) {
     console.error(`[scheduler] Image gen failed:`, String(e));
     return '';
@@ -271,10 +278,12 @@ async function sendEvolutionText(instance: string, jid: string, text: string): P
 }
 
 async function sendEvolutionMedia(instance: string, jid: string, caption: string, mediaUrl: string): Promise<void> {
+  // Evolution accepts a public URL or raw base64. Generated images come as a data URL → strip prefix.
+  const media = mediaUrl.startsWith('data:') ? mediaUrl.replace(/^data:[^;]+;base64,/, '') : mediaUrl;
   await fetch(`${config.evolution.url}/message/sendMedia/${instance}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
-    body: JSON.stringify({ number: jid, mediatype: 'image', media: mediaUrl, caption }),
+    body: JSON.stringify({ number: jid, mediatype: 'image', media, caption }),
   });
 }
 

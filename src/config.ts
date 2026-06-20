@@ -64,6 +64,8 @@ export const config = {
     fallbackModel: process.env.OPENROUTER_FALLBACK_MODEL ?? 'google/gemini-3.1-flash-lite',
     ttlModel: process.env.MODEL_TTS ?? 'google/gemini-3.1-flash-tts-preview',
     ttsVoice: process.env.VOICE_TTS ?? 'Kore',
+    // Image generation model (returns an image via chat completions + modalities).
+    imageModel: process.env.MODEL_IMAGE ?? 'google/gemini-3.1-flash-image-preview',
     // Context management: total window of the chat model and the fill ratio at which
     // we summarize older history. Default model ≈ 1M tokens → summarize at 700k.
     contextWindowTokens: parseInt(process.env.MODEL_CONTEXT_TOKENS ?? '1000000', 10),
