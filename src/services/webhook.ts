@@ -42,10 +42,21 @@ interface RoutableAgent {
   groupConfig?: GroupConfig;
 }
 
-/** Pull the reply/quote context out of a message. WhatsApp/Evolution nest contextInfo under
- *  different keys (and casings) across message types and versions, so we deep-search the whole
- *  object for a stanzaId / stanzaID (the reply marker) and grab the sibling participant. */
+/** Pull the reply/quote context out of a message. WhatsApp uses two shapes:
+ *  (a) the classic contextInfo.stanzaId, and (b) the newer "thread" reply:
+ *      messageContextInfo.threadId[].threadKey.{id, participant}.
+ *  We handle both (deep-searching for the classic one across nested message types). */
 function extractReplyContext(message: Record<string, unknown>): { stanzaId?: string; participant?: string } {
+  // (b) New thread-reply structure.
+  const mci = message.messageContextInfo as Record<string, unknown> | undefined;
+  const threads = mci?.threadId as Array<Record<string, unknown>> | undefined;
+  if (Array.isArray(threads)) {
+    for (const t of threads) {
+      const tk = t?.threadKey as Record<string, unknown> | undefined;
+      if (tk?.id) return { stanzaId: String(tk.id), participant: tk.participant ? String(tk.participant) : undefined };
+    }
+  }
+  // (a) Classic structure — deep-search for stanzaId wherever it is nested.
   let found: { stanzaId?: string; participant?: string } = {};
   const visit = (o: unknown, depth: number) => {
     if (found.stanzaId || !o || typeof o !== 'object' || depth > 6) return;
@@ -517,8 +528,12 @@ export async function handleEvolutionMessageWebhook(
       const replyToBot = !!reply.stanzaId && (
         repliesBotMsg || idMatches(replyParticipant) || (!haveLid && !replyParticipant)
       );
-      // TEMP diagnostic — reveals why a reply is/ isn't treated as "to the bot".
-      console.log(`[ev-webhook] GROUP-DIAG jid=${jid} stanzaId=${reply.stanzaId ?? 'none'} participant=${replyParticipant || 'none'} repliesBotMsg=${repliesBotMsg} replyToBot=${replyToBot} haveLid=${haveLid} botIds=[${botIds.join(',')}] msg=${JSON.stringify(message).slice(0, 900)}`);
+      // When we KNOW this reply quotes a bot message, its quoted author is the bot's @lid — learn
+      // it so future mentions/replies match precisely (no more lenient fallback).
+      if (repliesBotMsg && replyParticipant && !idMatches(replyParticipant)) {
+        await redis.sadd(`bot_ids:${instance}`, replyParticipant).catch(() => {});
+        await redis.expire(`bot_ids:${instance}`, 60 * 60 * 24 * 60).catch(() => {});
+      }
       const gate = groupFilter({
         jid,
         messageText: cheapText(message), // text only — audio NOT transcribed yet
