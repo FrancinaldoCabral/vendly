@@ -13,6 +13,13 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
+    // 401 mid-session = expired token or a subscription that is no longer active. Drop the token
+    // and send the user back to login (where the reason is shown). Skip for the auth endpoints
+    // themselves so their own error messages still surface on the login screen.
+    if (res.status === 401 && !path.startsWith('/auth/')) {
+      localStorage.removeItem('smcp_token');
+      if (!location.pathname.startsWith('/login')) location.assign('/login');
+    }
     throw new Error(err.error ?? res.statusText);
   }
   return res.json() as Promise<T>;

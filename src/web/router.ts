@@ -119,6 +119,15 @@ apiRouter.post('/auth/token', async (req, res) => {
     const { token } = req.body as { token?: string };
     if (!token) { res.status(400).json({ error: 'token obrigatório' }); return; }
     const payload = jwt.verify(token, config.jwt.secret) as { tenantId: string; email: string };
+
+    // Re-validate the subscription: a magic link stays valid for days, so the subscription may
+    // have lapsed since it was issued. Don't mint a session for an inactive subscriber.
+    const wc = await checkWcSubscription(payload.email);
+    if (!wc.hasAccess) {
+      res.status(403).json({ error: 'Nenhuma assinatura ativa encontrada para este email.' });
+      return;
+    }
+
     const sessionToken = signTenantToken(payload.tenantId, payload.email);
     res.json({ token: sessionToken, tenantId: payload.tenantId });
 

@@ -4,6 +4,7 @@
  */
 import { config } from '../config.js';
 import { getDb } from '../tools/mongodb.js';
+import { getRedis } from '../tools/redis.js';
 import nodemailer from 'nodemailer';
 import jwt from 'jsonwebtoken';
 
@@ -102,6 +103,10 @@ export interface AgentDoc {
 
 export interface WcSubscriptionResult {
   hasAccess: boolean;
+  /** True when the check could NOT be completed (WC unreachable / endpoint error / unconfigured),
+   *  as opposed to a definitive "not an active subscriber". Lets the periodic session recheck
+   *  fail OPEN on transient errors instead of locking out paying customers. */
+  error?: boolean;
   wcUserId?: number;
   wcUserName?: string;
   plan?: string;
@@ -110,9 +115,10 @@ export interface WcSubscriptionResult {
 export async function checkWcSubscription(email: string): Promise<WcSubscriptionResult> {
   const { url, consumerKey, consumerSecret, subscriptionProductId } = config.woocommerce;
   if (!url || !consumerKey || !consumerSecret) {
-    // Fail CLOSED: the subscription gate must never grant access when it isn't configured.
+    // Fail CLOSED at login, but mark as error so the periodic recheck doesn't lock out live
+    // sessions over a (deploy) misconfiguration.
     console.error('[provisioning] WooCommerce credentials not configured — DENYING access (set WC_URL / WC_CONSUMER_KEY / WC_CONSUMER_SECRET)');
-    return { hasAccess: false };
+    return { hasAccess: false, error: true };
   }
 
   const base = url.replace(/\/$/, '');
@@ -136,10 +142,11 @@ export async function checkWcSubscription(email: string): Promise<WcSubscription
       customerName = c ? [c.first_name, c.last_name].filter(Boolean).join(' ') : undefined;
     } else {
       console.error(`[provisioning] WC customer lookup failed: ${cr.status}`);
+      return { hasAccess: false, error: true }; // couldn't determine → indeterminate
     }
     if (!customerId) {
       console.warn(`[provisioning] no WordPress user for ${wantEmail} — denying access`);
-      return { hasAccess: false };
+      return { hasAccess: false }; // definitive: no such user
     }
 
     // 2. Only ACTIVE subscribers pass. WooCommerce Subscriptions sets the role to `subscriber`
@@ -156,7 +163,7 @@ export async function checkWcSubscription(email: string): Promise<WcSubscription
     const r = await fetch(`${base}/wp-json/wc/v1/subscriptions?${params}`, { headers });
     if (!r.ok) {
       console.error(`[provisioning] WC subscriptions check failed: ${r.status}`);
-      return { hasAccess: false };
+      return { hasAccess: false, error: true }; // couldn't determine → indeterminate
     }
 
     type WcSubscription = {
@@ -183,7 +190,39 @@ export async function checkWcSubscription(email: string): Promise<WcSubscription
     return { hasAccess: true, wcUserId: customerId, wcUserName };
   } catch (e) {
     console.error('[provisioning] WC subscription check error:', String(e));
-    return { hasAccess: false };
+    return { hasAccess: false, error: true }; // network/parse failure → indeterminate
+  }
+}
+
+// ── Cached subscription gate for live sessions ───────────────────────────────
+// Sessions last 30 days; without this a lapsed subscriber would keep access until expiry.
+// We re-check periodically (cached in Redis so we don't hit WooCommerce on every request) and
+// fail OPEN on transient WC/Redis errors so a blip never locks out paying customers.
+
+const SUB_CACHE_OK_TTL = 60 * 60 * 12; // 12h — re-check active subscribers twice a day
+const SUB_CACHE_DENY_TTL = 60 * 30;    // 30min — denied users get re-checked sooner (may renew)
+const SUB_CACHE_SOFT_TTL = 60 * 5;     // 5min — transient error → short grace then retry
+
+export async function isSessionSubscriptionActive(email: string): Promise<boolean> {
+  if (!email || email === 'admin') return true;
+  const key = `subgate:${email.trim().toLowerCase()}`;
+  let redis: ReturnType<typeof getRedis>;
+  try { redis = getRedis(); } catch { return true; } // no Redis → don't lock out
+
+  try {
+    const cached = await redis.get(key);
+    if (cached === 'ok') return true;
+    if (cached === 'deny') return false;
+  } catch { return true; } // Redis read failure → don't lock out
+
+  const res = await checkWcSubscription(email);
+  try {
+    if (res.hasAccess) { await redis.set(key, 'ok', 'EX', SUB_CACHE_OK_TTL); return true; }
+    if (res.error) { await redis.set(key, 'ok', 'EX', SUB_CACHE_SOFT_TTL); return true; } // indeterminate → grace
+    await redis.set(key, 'deny', 'EX', SUB_CACHE_DENY_TTL);
+    return false; // definitive: not an active subscriber
+  } catch {
+    return res.hasAccess || !!res.error; // Redis write failed → mirror decision, fail open on error
   }
 }
 
