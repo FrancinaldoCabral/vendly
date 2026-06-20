@@ -42,16 +42,27 @@ interface RoutableAgent {
   groupConfig?: GroupConfig;
 }
 
-/** Pull the reply/quote context out of any message type (for accurate group reply detection). */
+/** Pull the reply/quote context out of a message. WhatsApp/Evolution nest contextInfo under
+ *  different keys (and casings) across message types and versions, so we deep-search the whole
+ *  object for a stanzaId / stanzaID (the reply marker) and grab the sibling participant. */
 function extractReplyContext(message: Record<string, unknown>): { stanzaId?: string; participant?: string } {
-  const types = ['extendedTextMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'stickerMessage'];
-  for (const t of types) {
-    const ci = (message[t] as Record<string, unknown> | undefined)?.contextInfo as Record<string, unknown> | undefined;
-    if (ci?.stanzaId) return { stanzaId: String(ci.stanzaId), participant: ci.participant ? String(ci.participant) : undefined };
-  }
-  const ci2 = (message as Record<string, unknown>).contextInfo as Record<string, unknown> | undefined;
-  if (ci2?.stanzaId) return { stanzaId: String(ci2.stanzaId), participant: ci2.participant ? String(ci2.participant) : undefined };
-  return {};
+  let found: { stanzaId?: string; participant?: string } = {};
+  const visit = (o: unknown, depth: number) => {
+    if (found.stanzaId || !o || typeof o !== 'object' || depth > 6) return;
+    const r = o as Record<string, unknown>;
+    const sid = r.stanzaId ?? r.stanzaID ?? r.stanza_id;
+    if (typeof sid === 'string' && sid) {
+      const part = r.participant ?? r.remoteJid;
+      found = { stanzaId: sid, participant: typeof part === 'string' ? part : undefined };
+      return;
+    }
+    for (const v of Object.values(r)) {
+      if (found.stanzaId) break;
+      if (v && typeof v === 'object') visit(v, depth + 1);
+    }
+  };
+  visit(message, 0);
+  return found;
 }
 
 /** Phone numbers mentioned in a message (contextInfo.mentionedJid) — the authoritative @mention
@@ -507,10 +518,7 @@ export async function handleEvolutionMessageWebhook(
         repliesBotMsg || idMatches(replyParticipant) || (!haveLid && !replyParticipant)
       );
       // TEMP diagnostic — reveals why a reply is/ isn't treated as "to the bot".
-      const botSentSample = await redis.smembers(`bot_sent:${instance}`).catch(() => [] as string[]);
-      const ctx = ((message.extendedTextMessage as Record<string, unknown> | undefined)?.contextInfo
-        ?? (message as Record<string, unknown>).contextInfo ?? {}) as Record<string, unknown>;
-      console.log(`[ev-webhook] GROUP-DIAG jid=${jid} stanzaId=${reply.stanzaId ?? 'none'} participant=${replyParticipant || 'none'} repliesBotMsg=${repliesBotMsg} replyToBot=${replyToBot} haveLid=${haveLid} botIds=[${botIds.join(',')}] bot_sent(${botSentSample.length})=[${botSentSample.slice(0, 6).join(',')}] mentions=[${extractMentionedPhones(message).join(',')}] ctxKeys=${JSON.stringify(Object.keys(ctx))}`);
+      console.log(`[ev-webhook] GROUP-DIAG jid=${jid} stanzaId=${reply.stanzaId ?? 'none'} participant=${replyParticipant || 'none'} repliesBotMsg=${repliesBotMsg} replyToBot=${replyToBot} haveLid=${haveLid} botIds=[${botIds.join(',')}] msg=${JSON.stringify(message).slice(0, 900)}`);
       const gate = groupFilter({
         jid,
         messageText: cheapText(message), // text only — audio NOT transcribed yet
