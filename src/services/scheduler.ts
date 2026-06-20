@@ -6,6 +6,7 @@
 import cron from 'node-cron';
 import { getDb } from '../tools/mongodb.js';
 import { config } from '../config.js';
+import { uploadFile } from './storage.js';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -100,7 +101,7 @@ async function runPostPipeline(post: ScheduledPost): Promise<void> {
   // Execute pipeline steps sequentially, passing context forward
   for (const step of post.pipeline) {
     try {
-      const result = await executePipelineStep(step, context, post.agentId);
+      const result = await executePipelineStep(step, context, post.agentId, post.tenantId);
       Object.assign(context, result);
     } catch (e) {
       console.error(`[scheduler] Step ${step.type} failed:`, String(e));
@@ -122,6 +123,7 @@ async function executePipelineStep(
   step: PipelineStep,
   context: Record<string, unknown>,
   agentId: string,
+  tenantId: string,
 ): Promise<Record<string, unknown>> {
   switch (step.type) {
     case 'search': {
@@ -132,7 +134,7 @@ async function executePipelineStep(
 
     case 'image_gen': {
       const prompt = String(step.config.prompt ?? context.searchResult ?? context.topic ?? '');
-      const imageUrl = await generateImage(prompt, agentId);
+      const imageUrl = await generateImage(prompt, tenantId);
       return { imageUrl };
     }
 
@@ -215,7 +217,7 @@ async function webSearch(query: string): Promise<string> {
 
 // ── Image generation ─────────────────────────────────────────────────────────
 
-async function generateImage(prompt: string, _agentId: string): Promise<string> {
+async function generateImage(prompt: string, tenantId: string): Promise<string> {
   if (!prompt) return '';
   try {
     // OpenRouter generates images through the chat completions API with image modality — there is
@@ -239,7 +241,24 @@ async function generateImage(prompt: string, _agentId: string): Promise<string> 
     let data: { choices?: Array<{ message?: { images?: Array<{ image_url?: { url?: string } }> } }> };
     try { data = JSON.parse(raw); } catch { console.error('[scheduler] Image gen: non-JSON response'); return ''; }
     const url = data.choices?.[0]?.message?.images?.[0]?.image_url?.url ?? '';
-    console.log(`[scheduler] Image gen (${config.openrouter.imageModel}): ${url ? `ok (${url.slice(0, 24)}…)` : 'no image returned'}`);
+    if (!url) { console.log(`[scheduler] Image gen (${config.openrouter.imageModel}): no image returned`); return ''; }
+    // Images come back as a base64 data URL. WhatsApp Status needs a real URL (it rejects base64),
+    // so upload to our storage and use the public URL everywhere. Fall back to the data URL.
+    if (url.startsWith('data:')) {
+      const m = /^data:([^;]+);base64,(.*)$/s.exec(url);
+      if (m) {
+        try {
+          const ext = (m[1].split('/')[1] ?? 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+          const publicUrl = await uploadFile(tenantId, `post.${ext}`, m[1], Buffer.from(m[2], 'base64'));
+          console.log(`[scheduler] Image gen: uploaded → ${publicUrl}`);
+          return publicUrl;
+        } catch (e) {
+          console.warn('[scheduler] Image upload failed, using base64:', String(e));
+          return url;
+        }
+      }
+    }
+    console.log(`[scheduler] Image gen (${config.openrouter.imageModel}): ok (${url.slice(0, 40)}…)`);
     return url;
   } catch (e) {
     console.error(`[scheduler] Image gen failed:`, String(e));
