@@ -4,6 +4,7 @@
  * Executes pipeline[] steps (search, image_gen, fetch_url, compose) then posts.
  */
 import cron from 'node-cron';
+import sharp from 'sharp';
 import { getDb } from '../tools/mongodb.js';
 import { config } from '../config.js';
 import { uploadFile } from './storage.js';
@@ -248,9 +249,19 @@ async function generateImage(prompt: string, tenantId: string): Promise<string> 
       const m = /^data:([^;]+);base64,(.*)$/s.exec(url);
       if (m) {
         try {
-          const ext = (m[1].split('/')[1] ?? 'png').replace(/[^a-z0-9]/gi, '') || 'png';
-          const publicUrl = await uploadFile(tenantId, `post.${ext}`, m[1], Buffer.from(m[2], 'base64'));
-          console.log(`[scheduler] Image gen: uploaded → ${publicUrl}`);
+          let buf: Buffer = Buffer.from(m[2], 'base64');
+          let mime = m[1];
+          let ext = (mime.split('/')[1] ?? 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+          // WhatsApp Status does NOT support webp (chat/groups do). Convert to JPEG so the same
+          // image works everywhere — status, groups and contacts.
+          if (mime === 'image/webp') {
+            try {
+              buf = Buffer.from(await sharp(buf).jpeg({ quality: 88 }).toBuffer());
+              mime = 'image/jpeg'; ext = 'jpg';
+            } catch (e) { console.warn('[scheduler] webp→jpeg conversion failed, keeping webp:', String(e)); }
+          }
+          const publicUrl = await uploadFile(tenantId, `post.${ext}`, mime, buf);
+          console.log(`[scheduler] Image gen: uploaded (${mime}) → ${publicUrl}`);
           return publicUrl;
         } catch (e) {
           console.warn('[scheduler] Image upload failed, using base64:', String(e));
