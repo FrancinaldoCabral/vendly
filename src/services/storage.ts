@@ -56,8 +56,13 @@ export async function uploadFile(
   }
   await ensureBucket();
   const safe = fileName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80) || 'arquivo';
-  const key = `uploads/${tenantId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`;
-  await getClient().putObject(config.minio.bucket, key, data, data.length, { 'Content-Type': contentType || 'application/octet-stream' });
+  // Store under the `public/` prefix — that's the only path this MinIO serves publicly, so the
+  // returned URL is reachable by WhatsApp/Evolution/the browser.
+  const key = `public/${tenantId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safe}`;
+  const bucket = config.minio.bucket;
+  await getClient().putObject(bucket, key, data, data.length, { 'Content-Type': contentType || 'application/octet-stream' });
+  // Mark the object public-read (mirrors the chat-server uploader on the same MinIO).
+  await getClient().setObjectTagging(bucket, key, { acl: 'public-read' }).catch(() => { /* non-fatal */ });
 
   const m = config.minio;
   if (m.publicBaseUrl) return `${m.publicBaseUrl.replace(/\/$/, '')}/${key}`;

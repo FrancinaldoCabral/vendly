@@ -14,7 +14,8 @@ if (minioServerUrl) {
   } catch { /* ignore malformed URL */ }
 }
 if (!minioPort) minioPort = minioSSL ? 443 : 80;
-const minioBucket = process.env.MINIO_BUCKET ?? 'vendly';
+// Bucket whose `public/` prefix is served publicly (matches the chat-server setup on this MinIO).
+const minioBucket = process.env.MINIO_BUCKET ?? 'storage';
 const minioPublicUrl = process.env.MINIO_PUBLIC_URL
   ?? (minioServerUrl ? `${minioServerUrl.replace(/\/$/, '')}/${minioBucket}` : '');
 
