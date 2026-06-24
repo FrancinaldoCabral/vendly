@@ -529,9 +529,10 @@ export async function handleEvolutionMessageWebhook(
       // A reply counts as "to the bot" if it quotes a message the bot actually sent (authoritative,
       // @lid-independent) OR, as a fallback, the quoted author matches a known bot identity.
       const repliesBotMsg = !!reply.stanzaId && (await redis.sismember(`bot_sent:${instance}`, reply.stanzaId).catch(() => 0)) === 1;
-      const replyToBot = !!reply.stanzaId && (
-        repliesBotMsg || idMatches(replyParticipant) || (!haveLid && !replyParticipant)
-      );
+      // ONLY a reply to the bot's OWN message counts. Authoritative: the quoted id is one the bot
+      // sent (bot_sent). Secondary: the quoted author matches the bot's known @lid (covers messages
+      // sent before tracking began). NO loose fallback — that made it answer replies to anyone.
+      const replyToBot = repliesBotMsg || (!!replyParticipant && idMatches(replyParticipant));
       // When we KNOW this reply quotes a bot message, its quoted author is the bot's @lid — learn
       // it so future mentions/replies match precisely (no more lenient fallback).
       if (repliesBotMsg && replyParticipant && !idMatches(replyParticipant)) {
