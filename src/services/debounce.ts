@@ -40,6 +40,25 @@ SUAS CAPACIDADES (já habilitadas pela plataforma — nunca diga que não conseg
 - NUNCA afirme que não pode ouvir, ver, ler ou enviar áudio/mídia — você pode.
   Não mencione detalhes técnicos; apenas atenda com naturalidade.`;
 
+// Internal handoff instruction — injected ONLY when the business has configured a human
+// target (team/assignee). Teaches the model the [ESCALAR_HUMANO] convention so the client's
+// own prompt can speak naturally ("transfira para um humano quando…") without knowing the
+// syntax. Deliberately conservative: escalating silences the bot for 24h, so the model must
+// hand off only when truly needed — never out of mere uncertainty.
+const ESCALATION_SUFFIX = `
+
+---
+TRANSFERÊNCIA PARA ATENDIMENTO HUMANO (mecanismo da plataforma):
+- Quando precisar passar a conversa para um atendente humano, inclua em qualquer ponto da
+  sua resposta a marca [ESCALAR_HUMANO]. Ela é interna: o cliente NÃO a vê, e a plataforma
+  direciona a conversa para a equipe.
+- Antes da marca, avise o cliente com UMA frase curta e gentil de que vai chamar um atendente.
+- Use com MODERAÇÃO. Só transfira quando: (a) o cliente pedir claramente para falar com uma
+  pessoa, OU (b) for um assunto que você realmente não pode resolver (ex.: pagamento, reembolso,
+  cobrança, acesso à conta travado) ou algo claramente fora do seu escopo.
+- NUNCA transfira por estar apenas em dúvida — primeiro tente ajudar, pergunte e esclareça.
+- NUNCA transfira repetidamente nem em toda mensagem: uma transferência por assunto basta.`;
+
 // Friendly noun for each asset kind, used when listing the configured items per action.
 const ASSET_NOUN: Record<AssetKind, string> = {
   menus: 'menus', reactions: 'reações', stickers: 'figurinhas', labels: 'etiquetas',
@@ -74,7 +93,11 @@ REGRA CRÍTICA — NUNCA FINJA UMA AÇÃO:
 - NUNCA diga que etiquetou, removeu etiqueta, reagiu, enviou menu/figurinha/arquivo/localização/contato se não há ferramenta para isso ou se você não a chamou.
 - Se o cliente (ou a situação) pedir algo fora das ações acima, NÃO simule: faça o que estiver ao seu alcance por texto e, se for o caso, registre internamente sem anunciar uma ação inexistente.`;
 
-  return CAPABILITIES_MEDIA + actionsBlock + antiHallucination;
+  // Handoff is only offered to the model when a human target is actually configured — otherwise
+  // an escalation would just silence the bot for 24h with nobody to pick it up.
+  const escalationBlock = (agent.escalationTeamId || agent.escalationAgentId) ? ESCALATION_SUFFIX : '';
+
+  return CAPABILITIES_MEDIA + actionsBlock + antiHallucination + escalationBlock;
 }
 
 // ── In-process keyed mutex ───────────────────────────────────────────────────
