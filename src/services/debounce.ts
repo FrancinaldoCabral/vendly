@@ -97,8 +97,21 @@ REGRA CRÍTICA — NUNCA FINJA UMA AÇÃO:
   // an escalation would just silence the bot for 24h with nobody to pick it up.
   const escalationBlock = (agent.escalationTeamId || agent.escalationAgentId) ? ESCALATION_SUFFIX : '';
 
-  return CAPABILITIES_MEDIA + actionsBlock + antiHallucination + escalationBlock;
+  return CAPABILITIES_MEDIA + actionsBlock + KNOWLEDGE_SUFFIX + antiHallucination + escalationBlock;
 }
+
+// Always injected. The model has the `buscar_memoria` tool (semantic search over the business
+// knowledge base), but tends to answer from assumption and may wrongly deny a real feature. This
+// forces it to consult the base before answering "what/how/price/rules" questions and, above all,
+// never to deny a capability without having searched first.
+const KNOWLEDGE_SUFFIX = `
+
+USO DA BASE DE CONHECIMENTO (regra obrigatória):
+- Você tem a ferramenta buscar_memoria, que consulta a base de conhecimento do negócio (produtos, funcionalidades, recursos, preços, prazos, políticas e procedimentos).
+- SEMPRE chame buscar_memoria antes de responder perguntas sobre o que o produto/sistema faz, como fazer algo, valores, prazos ou regras — mesmo que ache que já sabe a resposta.
+- NUNCA afirme que algo "não existe", "não é possível", "não faz parte" ou "não é nativo" sem ter buscado antes na base. A maioria dessas perguntas tem resposta na base.
+- Se, após buscar, você não encontrar a informação, NÃO negue categoricamente: diga que vai confirmar, peça mais detalhes ou encaminhe — nunca invente uma negativa que pode fazer o cliente desistir.
+- Na dúvida sobre uma funcionalidade, prefira buscar e, se ainda assim incerto, ser cauteloso e prestativo em vez de dizer que não dá.`;
 
 // ── In-process keyed mutex ───────────────────────────────────────────────────
 // Serializes async work sharing a key within this Node process. Used to stop

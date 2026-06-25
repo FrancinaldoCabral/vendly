@@ -147,8 +147,9 @@ const BUSCAR_MEMORIA_TOOL = {
   function: {
     name: 'buscar_memoria',
     description:
-      'Busca informações relevantes na base de conhecimento do agente usando busca semântica. ' +
-      'Use sempre que precisar de informações sobre produtos, políticas, procedimentos ou contexto do negócio.',
+      'Busca informações na base de conhecimento do negócio (produtos, funcionalidades, recursos, preços, prazos, políticas, procedimentos). ' +
+      'OBRIGATÓRIO: chame esta ferramenta ANTES de responder qualquer pergunta sobre o que o produto/sistema faz, como fazer algo, valores ou regras — mesmo que ache que já sabe. ' +
+      'NUNCA diga que uma funcionalidade não existe sem antes buscar aqui.',
     parameters: {
       type: 'object',
       required: ['query'],
