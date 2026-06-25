@@ -84,8 +84,9 @@ interface ItemMeta {
   category: string;
   agentId: string;
   tenantId: string;
-  source?: 'text' | 'file';
+  source?: 'text' | 'file' | 'url';
   fileName?: string;
+  sourceUrl?: string;
   createdAt?: string;
 }
 
@@ -112,6 +113,7 @@ async function buildPoints(groupId: string, fullText: string, meta: ItemMeta) {
         chunkCount: chunks.length,
         source: meta.source ?? 'text',
         ...(meta.fileName ? { fileName: meta.fileName } : {}),
+        ...(meta.sourceUrl ? { sourceUrl: meta.sourceUrl } : {}),
         // The full original text lives only on the first chunk, so the editor can reconstruct it.
         ...(i === 0 ? { fullText } : {}),
       },
@@ -167,6 +169,83 @@ async function upsertPoints(collection: string, points: unknown[]): Promise<void
   });
 }
 
+// ── Content extraction (no hard whitelist — route by type, reject only the truly unreadable) ──
+
+const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
+
+/** Rough HTML → plain text: drop scripts/styles, turn block tags into line breaks, strip the rest. */
+function htmlToText(html: string): string {
+  let s = html
+    .replace(/<(script|style|noscript|svg|head)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<\/(p|div|li|h[1-6]|tr|section|article|header|footer)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+  // Decode the most common HTML entities.
+  s = s.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+       .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  return s.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+/** Heuristic: too many NUL/replacement chars means it's binary, not text. */
+function looksBinary(s: string): boolean {
+  if (!s) return true;
+  const sample = s.slice(0, 4000);
+  let bad = 0;
+  for (const ch of sample) { const c = ch.charCodeAt(0); if (c === 0 || c === 0xFFFD) bad++; }
+  return bad / sample.length > 0.1;
+}
+
+/** Use the multimodal model to read an image (text + relevant content). No OCR dependency. */
+async function extractImageText(buffer: Buffer, mime: string): Promise<string> {
+  const dataUrl = `data:${mime || 'image/png'};base64,${buffer.toString('base64')}`;
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.openrouter.apiKey}` },
+    body: JSON.stringify({
+      model: config.openrouter.multimodalModel,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Extraia TODO o texto presente nesta imagem e descreva de forma objetiva o conteúdo relevante para uma base de conhecimento de atendimento (tabelas, valores, instruções, etc.). Responda em português, apenas com o conteúdo, sem comentários seus.' },
+          { type: 'image_url', image_url: { url: dataUrl } },
+        ],
+      }],
+    }),
+  });
+  const d = await r.json() as { choices?: Array<{ message?: { content?: string } }> };
+  return (d.choices?.[0]?.message?.content ?? '').trim();
+}
+
+/** Extract text from any supported file, choosing the strategy by extension/mime. */
+async function extractFromFile(buffer: Buffer, fileName: string, mime: string): Promise<string> {
+  const ext = (fileName.split('.').pop() ?? '').toLowerCase();
+
+  if (ext === 'pdf' || mime === 'application/pdf') {
+    const parser = new PDFParse({ data: buffer });
+    const result = await parser.getText();
+    const t = (result.text ?? '').trim();
+    if (!t) throw new Error('Este PDF não tem texto selecionável (parece ser digitalizado). Envie como imagem para a IA ler, ou cole o texto.');
+    return t;
+  }
+  if (ext === 'docx' || mime.includes('officedocument.wordprocessingml')) {
+    const result = await mammoth.extractRawText({ buffer });
+    return (result.value ?? '').trim();
+  }
+  if (IMAGE_EXTS.includes(ext) || mime.startsWith('image/')) {
+    return extractImageText(buffer, mime || `image/${ext}`);
+  }
+  if (ext === 'html' || ext === 'htm' || mime.includes('html')) {
+    return htmlToText(buffer.toString('utf8'));
+  }
+  // Anything else: try to read as text (txt, md, csv, json, code, etc.). Reject only real binaries.
+  const decoded = buffer.toString('utf8');
+  if (looksBinary(decoded)) {
+    throw new Error('Não foi possível ler este arquivo como texto. Envie PDF, DOCX, imagem, ou um arquivo de texto.');
+  }
+  return decoded.trim();
+}
+
 // GET /api/knowledge?agentId=&category= — returns one row per logical item (grouped chunks)
 knowledgeRouter.get('/', async (req, res) => {
   try {
@@ -203,6 +282,7 @@ knowledgeRouter.get('/', async (req, res) => {
           chunkCount: Number(head.chunkCount ?? pts.length),
           source: (head.source as string) ?? 'text',
           fileName: head.fileName as string | undefined,
+          sourceUrl: head.sourceUrl as string | undefined,
         },
       };
     })
@@ -231,7 +311,8 @@ knowledgeRouter.post('/', async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// POST /api/knowledge/upload — create from a file (PDF/DOCX/TXT/MD) sent as base64
+// POST /api/knowledge/upload — create from a file (PDF/DOCX/imagem/HTML/texto) enviado em base64.
+// Sem whitelist: o tipo é roteado e só recusamos o que realmente não é legível.
 knowledgeRouter.post('/upload', async (req, res) => {
   try {
     const tenantId = req.auth!.tenantId;
@@ -242,30 +323,54 @@ knowledgeRouter.post('/upload', async (req, res) => {
     const collection = await resolveCollection(agentId, tenantId);
     if (!collection) { res.status(404).json({ error: 'Agente não encontrado' }); return; }
 
+    const mime = fileBase64.match(/^data:([^;,]+)[;,]/)?.[1] ?? '';
     const buffer = Buffer.from(fileBase64.replace(/^data:[^,]*,/, ''), 'base64');
-    const ext = (fileName.split('.').pop() ?? '').toLowerCase();
 
-    let text = '';
-    if (ext === 'pdf') {
-      const parser = new PDFParse({ data: buffer });
-      const result = await parser.getText();
-      text = result.text ?? '';
-    } else if (ext === 'docx') {
-      const result = await mammoth.extractRawText({ buffer });
-      text = result.value ?? '';
-    } else if (ext === 'txt' || ext === 'md' || ext === 'markdown') {
-      text = buffer.toString('utf8');
-    } else {
-      res.status(400).json({ error: 'Formato não suportado. Envie PDF, DOCX, TXT ou MD.' }); return;
-    }
-
-    text = text.trim();
+    const text = (await extractFromFile(buffer, fileName, mime)).trim();
     if (!text) { res.status(422).json({ error: 'Não foi possível extrair texto deste arquivo.' }); return; }
 
     const groupId = randomUUID();
     const itemTitle = (title && title.trim()) || fileName.replace(/\.[^.]+$/, '');
     const points = await buildPoints(groupId, text, {
       title: itemTitle, category: category ?? 'general', agentId, tenantId, source: 'file', fileName,
+    });
+    await upsertPoints(collection, points);
+    res.status(201).json({ id: groupId, chunkCount: points.length, title: itemTitle });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// POST /api/knowledge/url — create from a web page (fetch → extract text → chunk → embed)
+knowledgeRouter.post('/url', async (req, res) => {
+  try {
+    const tenantId = req.auth!.tenantId;
+    const { agentId, category, title } = req.body as Record<string, string>;
+    let { url } = req.body as Record<string, string>;
+    if (!agentId || !url) { res.status(400).json({ error: 'agentId e url são obrigatórios' }); return; }
+    if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+
+    const collection = await resolveCollection(agentId, tenantId);
+    if (!collection) { res.status(404).json({ error: 'Agente não encontrado' }); return; }
+
+    let html = '';
+    try {
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 20_000);
+      const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (VendlyBot)' }, signal: ctrl.signal });
+      clearTimeout(to);
+      if (!r.ok) { res.status(422).json({ error: `Não foi possível acessar a página (HTTP ${r.status}).` }); return; }
+      html = await r.text();
+    } catch {
+      res.status(422).json({ error: 'Não foi possível acessar a URL. Verifique o endereço.' }); return;
+    }
+
+    const pageTitle = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim();
+    const text = htmlToText(html);
+    if (!text) { res.status(422).json({ error: 'A página não tem texto extraível.' }); return; }
+
+    const groupId = randomUUID();
+    const itemTitle = (title && title.trim()) || pageTitle || url;
+    const points = await buildPoints(groupId, text, {
+      title: itemTitle, category: category ?? 'general', agentId, tenantId, source: 'url', sourceUrl: url,
     });
     await upsertPoints(collection, points);
     res.status(201).json({ id: groupId, chunkCount: points.length, title: itemTitle });
@@ -297,8 +402,9 @@ knowledgeRouter.put('/:groupId', async (req, res) => {
     // Replace: delete old chunk-points, insert freshly chunked + re-embedded ones (same groupId).
     const newPoints = await buildPoints(groupId, newText, {
       title: newTitle, category: newCategory, agentId, tenantId,
-      source: (head.source as 'text' | 'file') ?? 'text',
+      source: (head.source as 'text' | 'file' | 'url') ?? 'text',
       fileName: head.fileName as string | undefined,
+      sourceUrl: head.sourceUrl as string | undefined,
       createdAt: head.createdAt as string | undefined,
     });
     await deletePoints(collection, existing.map(p => p.id));

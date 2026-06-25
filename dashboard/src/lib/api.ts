@@ -99,6 +99,8 @@ export const api = {
     req<{ id: string; chunkCount: number }>('/knowledge', { method: 'POST', body: JSON.stringify(data) }),
   uploadKnowledge: (data: { agentId: string; fileName: string; fileBase64: string; category?: string; title?: string }) =>
     req<{ id: string; chunkCount: number; title: string }>('/knowledge/upload', { method: 'POST', body: JSON.stringify(data) }),
+  addKnowledgeUrl: (data: { agentId: string; url: string; category?: string; title?: string }) =>
+    req<{ id: string; chunkCount: number; title: string }>('/knowledge/url', { method: 'POST', body: JSON.stringify(data) }),
   updateKnowledge: (id: string, agentId: string, data: { title?: string; text?: string; category?: string }) =>
     req<{ ok: boolean }>(`/knowledge/${id}?agentId=${agentId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteKnowledge: (id: string, agentId: string) =>

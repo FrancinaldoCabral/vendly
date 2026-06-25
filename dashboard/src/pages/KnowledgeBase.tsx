@@ -3,7 +3,7 @@ import {
   Typography, Button, Table, Modal, Form, Input, Select, Space,
   Popconfirm, Tag, message, Alert, Upload,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, BookOutlined, UploadOutlined, PaperClipOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, BookOutlined, UploadOutlined, PaperClipOutlined, GlobalOutlined, LinkOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import type { KnowledgePoint } from '../lib/types';
@@ -30,6 +30,8 @@ export default function KnowledgeBase() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<KnowledgePoint | null>(null);
   const [preview, setPreview] = useState<KnowledgePoint | null>(null);
+  const [urlOpen, setUrlOpen] = useState(false);
+  const [urlForm] = Form.useForm();
 
   const { data: agents = [] } = useQuery({ queryKey: ['agents'], queryFn: api.getAgents });
 
@@ -75,6 +77,13 @@ export default function KnowledgeBase() {
     onError: (e: Error) => message.error(e.message),
   });
 
+  const addUrl = useMutation({
+    mutationFn: (vals: { url: string; title?: string }) =>
+      api.addKnowledgeUrl({ agentId, url: vals.url.trim(), title: vals.title?.trim() || undefined, category: catFilter || 'general' }),
+    onSuccess: (r) => { qc.invalidateQueries({ queryKey: ['knowledge'] }); message.success(`Site importado em ${r.chunkCount} trecho(s).`); setUrlOpen(false); urlForm.resetFields(); },
+    onError: (e: Error) => message.error(e.message),
+  });
+
   const openCreate = () => { form.resetFields(); form.setFieldValue('category', 'general'); setEditing(null); setOpen(true); };
   const openEdit = (kp: KnowledgePoint) => {
     form.setFieldsValue({ title: kp.payload.title, text: kp.payload.text, category: kp.payload.category });
@@ -92,6 +101,11 @@ export default function KnowledgeBase() {
           {kp.payload.source === 'file' && kp.payload.fileName && (
             <div style={{ fontSize: 11, color: '#8c8c8c' }}>
               <PaperClipOutlined /> {kp.payload.fileName}
+            </div>
+          )}
+          {kp.payload.source === 'url' && kp.payload.sourceUrl && (
+            <div style={{ fontSize: 11, color: '#8c8c8c', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <LinkOutlined /> {kp.payload.sourceUrl}
             </div>
           )}
         </div>
@@ -135,9 +149,11 @@ export default function KnowledgeBase() {
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}><BookOutlined /> Base de Conhecimento</Title>
-        <Space>
+        <Space wrap>
+          <Button icon={<GlobalOutlined />} onClick={() => { urlForm.resetFields(); setUrlOpen(true); }} disabled={!agentId}>
+            Adicionar site
+          </Button>
           <Upload
-            accept=".pdf,.docx,.txt,.md,.markdown"
             showUploadList={false}
             disabled={!agentId || upload.isPending}
             beforeUpload={(file) => { upload.mutate(file as unknown as File); return false; }}
@@ -184,6 +200,28 @@ export default function KnowledgeBase() {
           locale={{ emptyText: 'Nenhum item na base de conhecimento deste agente.' }}
         />
       )}
+
+      <Modal
+        title="Adicionar conhecimento de um site"
+        open={urlOpen}
+        onOk={() => urlForm.validateFields().then(vals => addUrl.mutate(vals as { url: string; title?: string }))}
+        onCancel={() => setUrlOpen(false)}
+        confirmLoading={addUrl.isPending}
+        okText="Importar"
+        destroyOnClose
+      >
+        <Paragraph type="secondary" style={{ fontSize: 13 }}>
+          Cole o endereço de uma página. Vamos ler o conteúdo dela e adicionar à base de conhecimento deste agente.
+        </Paragraph>
+        <Form form={urlForm} layout="vertical">
+          <Form.Item name="url" label="Endereço (URL)" rules={[{ required: true, message: 'Informe a URL' }]}>
+            <Input placeholder="https://seusite.com/pagina" />
+          </Form.Item>
+          <Form.Item name="title" label="Título (opcional)" extra="Se vazio, usamos o título da página.">
+            <Input placeholder="Ex: Política de trocas" />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       <Modal
         title={editing ? 'Editar item' : 'Novo item de conhecimento'}

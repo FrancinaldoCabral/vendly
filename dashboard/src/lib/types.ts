@@ -103,8 +103,9 @@ export interface KnowledgePoint {
     tenantId: string;
     createdAt?: string;
     chunkCount?: number;
-    source?: 'text' | 'file';
+    source?: 'text' | 'file' | 'url';
     fileName?: string;
+    sourceUrl?: string;
   };
 }
 
