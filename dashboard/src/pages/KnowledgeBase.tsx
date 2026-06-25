@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import {
   Typography, Button, Table, Modal, Form, Input, Select, Space,
-  Popconfirm, Tag, message, Alert,
+  Popconfirm, Tag, message, Alert, Upload,
 } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, BookOutlined } from '@ant-design/icons';
+import { PlusOutlined, EditOutlined, DeleteOutlined, BookOutlined, UploadOutlined, PaperClipOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import type { KnowledgePoint } from '../lib/types';
@@ -54,8 +54,24 @@ export default function KnowledgeBase() {
   });
 
   const remove = useMutation({
-    mutationFn: (id: number) => api.deleteKnowledge(id, agentId),
+    mutationFn: (id: string) => api.deleteKnowledge(id, agentId),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['knowledge'] }); message.success('Removido.'); },
+    onError: (e: Error) => message.error(e.message),
+  });
+
+  const upload = useMutation({
+    mutationFn: (file: File) => new Promise<{ chunkCount: number }>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        api.uploadKnowledge({
+          agentId, fileName: file.name, fileBase64: String(reader.result),
+          category: catFilter || 'general',
+        }).then(resolve).catch(reject);
+      };
+      reader.onerror = () => reject(new Error('Falha ao ler o arquivo.'));
+      reader.readAsDataURL(file);
+    }),
+    onSuccess: (r) => { qc.invalidateQueries({ queryKey: ['knowledge'] }); message.success(`Arquivo importado em ${r.chunkCount} trecho(s).`); },
     onError: (e: Error) => message.error(e.message),
   });
 
@@ -68,14 +84,33 @@ export default function KnowledgeBase() {
   const submit = () => form.validateFields().then(vals => { editing ? update.mutate(vals) : create.mutate(vals); });
 
   const cols = [
-    { title: 'Título', dataIndex: ['payload', 'title'], key: 'title', width: 200 },
+    {
+      title: 'Título', key: 'title', width: 220,
+      render: (_: unknown, kp: KnowledgePoint) => (
+        <div>
+          <Text strong style={{ fontSize: 13 }}>{kp.payload.title}</Text>
+          {kp.payload.source === 'file' && kp.payload.fileName && (
+            <div style={{ fontSize: 11, color: '#8c8c8c' }}>
+              <PaperClipOutlined /> {kp.payload.fileName}
+            </div>
+          )}
+        </div>
+      ),
+    },
     {
       title: 'Conteúdo', dataIndex: ['payload', 'text'], key: 'text',
       render: (t: string) => <Text style={{ fontSize: 12 }}>{t.length > 100 ? t.slice(0, 100) + '…' : t}</Text>,
     },
     {
-      title: 'Categoria', dataIndex: ['payload', 'category'], key: 'cat',
-      render: (c: string) => <Tag>{catMap[c] ?? c}</Tag>,
+      title: 'Categoria', key: 'cat', width: 180,
+      render: (_: unknown, kp: KnowledgePoint) => (
+        <Space size={4} wrap>
+          <Tag>{catMap[kp.payload.category] ?? kp.payload.category}</Tag>
+          {(kp.payload.chunkCount ?? 1) > 1 && (
+            <Tag color="purple" style={{ fontSize: 11 }}>{kp.payload.chunkCount} trechos</Tag>
+          )}
+        </Space>
+      ),
     },
     {
       title: 'Criado', dataIndex: ['payload', 'createdAt'], key: 'created',
@@ -100,9 +135,21 @@ export default function KnowledgeBase() {
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}><BookOutlined /> Base de Conhecimento</Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!agentId}>
-          Novo item
-        </Button>
+        <Space>
+          <Upload
+            accept=".pdf,.docx,.txt,.md,.markdown"
+            showUploadList={false}
+            disabled={!agentId || upload.isPending}
+            beforeUpload={(file) => { upload.mutate(file as unknown as File); return false; }}
+          >
+            <Button icon={<UploadOutlined />} loading={upload.isPending} disabled={!agentId}>
+              Enviar arquivo
+            </Button>
+          </Upload>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!agentId}>
+            Novo item
+          </Button>
+        </Space>
       </div>
 
       <Space style={{ marginBottom: 16 }} wrap>

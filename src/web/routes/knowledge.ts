@@ -1,8 +1,18 @@
 /**
  * knowledge.ts — Knowledge base CRUD (per-agent Qdrant collections)
  * Collection: agent_{agentId}
+ *
+ * A knowledge "item" is a logical unit (a pasted text or an uploaded document). On ingestion the
+ * text is split into smaller CHUNKS, and each chunk becomes its own Qdrant point sharing a stable
+ * `groupId`. This makes semantic search far more precise (a query matches the relevant slice, not
+ * one giant blob). The dashboard still sees one row per item: the GET endpoint groups points back
+ * by `groupId`. Editing an item re-chunks AND re-embeds (fixing the old bug where edits kept the
+ * stale vector). Files (PDF/DOCX/TXT/MD) are accepted as base64 and extracted to text server-side.
  */
 import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
+import { PDFParse } from 'pdf-parse';
+import mammoth from 'mammoth';
 import { config } from '../../config.js';
 import { getDb } from '../../tools/mongodb.js';
 
@@ -14,6 +24,102 @@ const qdrantHeaders = () => ({
   ...(config.qdrant.apiKey ? { 'api-key': config.qdrant.apiKey } : {}),
 });
 
+// ── Chunking ─────────────────────────────────────────────────────────────────
+// Target ~1400 chars (~350 tokens) per chunk: small enough for precise retrieval, large enough to
+// keep a coherent idea. Splits on paragraph boundaries, packing paragraphs until the limit; a
+// single oversized paragraph is split by sentences, then hard-cut as a last resort.
+const MAX_CHARS = 1400;
+
+function chunkText(input: string): string[] {
+  const text = input.replace(/\r\n/g, '\n').trim();
+  if (!text) return [];
+  if (text.length <= MAX_CHARS) return [text];
+
+  const paragraphs = text.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+  const chunks: string[] = [];
+  let buf = '';
+
+  const flush = () => { if (buf.trim()) chunks.push(buf.trim()); buf = ''; };
+
+  for (const para of paragraphs) {
+    if (para.length > MAX_CHARS) {
+      flush();
+      // Split the long paragraph by sentences, packing into chunks.
+      const sentences = para.match(/[^.!?\n]+[.!?]*\s*/g) ?? [para];
+      let sbuf = '';
+      for (const s of sentences) {
+        if ((sbuf + s).length > MAX_CHARS && sbuf) { chunks.push(sbuf.trim()); sbuf = ''; }
+        if (s.length > MAX_CHARS) {
+          // Hard-cut a single giant sentence.
+          for (let i = 0; i < s.length; i += MAX_CHARS) chunks.push(s.slice(i, i + MAX_CHARS).trim());
+        } else {
+          sbuf += s;
+        }
+      }
+      if (sbuf.trim()) chunks.push(sbuf.trim());
+      continue;
+    }
+    if ((buf + '\n\n' + para).length > MAX_CHARS && buf) flush();
+    buf = buf ? `${buf}\n\n${para}` : para;
+  }
+  flush();
+  return chunks.filter(Boolean);
+}
+
+// ── Embeddings ───────────────────────────────────────────────────────────────
+async function embed(input: string): Promise<number[]> {
+  const r = await fetch('https://openrouter.ai/api/v1/embeddings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.openrouter.apiKey}` },
+    body: JSON.stringify({ model: config.openrouter.embeddingModel, input }),
+  });
+  const data = await r.json() as { data?: { embedding: number[] }[] };
+  const vector = data.data?.[0]?.embedding;
+  if (!vector) throw new Error('Falha ao gerar embedding');
+  return vector;
+}
+
+interface ItemMeta {
+  title: string;
+  category: string;
+  agentId: string;
+  tenantId: string;
+  source?: 'text' | 'file';
+  fileName?: string;
+  createdAt?: string;
+}
+
+/** Build Qdrant points (one per chunk) for a logical item, embedding each chunk with its title for context. */
+async function buildPoints(groupId: string, fullText: string, meta: ItemMeta) {
+  const chunks = chunkText(fullText);
+  if (chunks.length === 0) throw new Error('Conteúdo vazio.');
+  const createdAt = meta.createdAt ?? new Date().toISOString();
+  const points = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const vector = await embed(`${meta.title}: ${chunks[i]}`);
+    points.push({
+      id: randomUUID(),
+      vector,
+      payload: {
+        groupId,
+        title: meta.title,
+        text: chunks[i],
+        category: meta.category || 'general',
+        agentId: meta.agentId,
+        tenantId: meta.tenantId,
+        createdAt,
+        chunkIndex: i,
+        chunkCount: chunks.length,
+        source: meta.source ?? 'text',
+        ...(meta.fileName ? { fileName: meta.fileName } : {}),
+        // The full original text lives only on the first chunk, so the editor can reconstruct it.
+        ...(i === 0 ? { fullText } : {}),
+      },
+    });
+  }
+  return points;
+}
+
 async function resolveCollection(agentId: string, tenantId: string): Promise<string | null> {
   if (!agentId) return null;
   const db = await getDb();
@@ -23,7 +129,45 @@ async function resolveCollection(agentId: string, tenantId: string): Promise<str
   return agent ? `agent_${agentId}` : null;
 }
 
-// GET /api/knowledge?agentId=&category=&page=&limit=
+interface RawPoint { id: string | number; payload?: Record<string, unknown> }
+
+/** Scroll all points of an agent (knowledge bases are small; one pass is fine). */
+async function scrollPoints(collection: string, agentId: string): Promise<RawPoint[]> {
+  const r = await fetch(`${qdrantBase}/collections/${collection}/points/scroll`, {
+    method: 'POST',
+    headers: qdrantHeaders(),
+    body: JSON.stringify({
+      limit: 4096, with_payload: true, with_vector: false,
+      filter: { must: [{ key: 'agentId', match: { value: agentId } }] },
+    }),
+  });
+  const data = await r.json() as { result?: { points: RawPoint[] } };
+  return data.result?.points ?? [];
+}
+
+/** Point ids that make up a logical item (by groupId; legacy single-point items match by raw id). */
+async function groupPointIds(collection: string, agentId: string, groupId: string): Promise<(string | number)[]> {
+  const points = await scrollPoints(collection, agentId);
+  const ids = points
+    .filter(p => (p.payload?.groupId ?? String(p.id)) === groupId)
+    .map(p => p.id);
+  return ids;
+}
+
+async function deletePoints(collection: string, ids: (string | number)[]): Promise<void> {
+  if (ids.length === 0) return;
+  await fetch(`${qdrantBase}/collections/${collection}/points/delete`, {
+    method: 'POST', headers: qdrantHeaders(), body: JSON.stringify({ points: ids }),
+  });
+}
+
+async function upsertPoints(collection: string, points: unknown[]): Promise<void> {
+  await fetch(`${qdrantBase}/collections/${collection}/points`, {
+    method: 'PUT', headers: qdrantHeaders(), body: JSON.stringify({ points }),
+  });
+}
+
+// GET /api/knowledge?agentId=&category= — returns one row per logical item (grouped chunks)
 knowledgeRouter.get('/', async (req, res) => {
   try {
     const tenantId = req.auth!.tenantId;
@@ -31,22 +175,45 @@ knowledgeRouter.get('/', async (req, res) => {
     const collection = await resolveCollection(agentId, tenantId);
     if (!collection) { res.status(400).json({ error: 'agentId obrigatório e válido' }); return; }
 
-    const limit = Math.min(Number(req.query.limit ?? 50), 200);
-    const offset = Number(req.query.page ?? 0) * limit;
-    const filter: Record<string, unknown>[] = [{ key: 'agentId', match: { value: agentId } }];
-    if (req.query.category) filter.push({ key: 'category', match: { value: String(req.query.category) } });
+    const points = await scrollPoints(collection, agentId);
+    const categoryFilter = req.query.category ? String(req.query.category) : '';
 
-    const r = await fetch(`${qdrantBase}/collections/${collection}/points/scroll`, {
-      method: 'POST',
-      headers: qdrantHeaders(),
-      body: JSON.stringify({ limit, offset, with_payload: true, with_vector: false, filter: { must: filter } }),
-    });
-    const data = await r.json() as { result?: { points: unknown[] } };
-    res.json({ data: data.result?.points ?? [] });
+    // Group chunk-points back into logical items by groupId (legacy points: their own id is the group).
+    const groups = new Map<string, RawPoint[]>();
+    for (const p of points) {
+      const gid = String(p.payload?.groupId ?? p.id);
+      if (!groups.has(gid)) groups.set(gid, []);
+      groups.get(gid)!.push(p);
+    }
+
+    const items = [...groups.entries()].map(([gid, pts]) => {
+      pts.sort((a, b) => Number(a.payload?.chunkIndex ?? 0) - Number(b.payload?.chunkIndex ?? 0));
+      const head = pts[0]?.payload ?? {};
+      const fullText = (head.fullText as string)
+        ?? pts.map(p => String(p.payload?.text ?? '')).join('\n\n');
+      return {
+        id: gid,
+        payload: {
+          title: String(head.title ?? ''),
+          text: fullText,
+          category: String(head.category ?? 'general'),
+          agentId,
+          tenantId: String(head.tenantId ?? tenantId),
+          createdAt: head.createdAt as string | undefined,
+          chunkCount: Number(head.chunkCount ?? pts.length),
+          source: (head.source as string) ?? 'text',
+          fileName: head.fileName as string | undefined,
+        },
+      };
+    })
+    .filter(it => !categoryFilter || it.payload.category === categoryFilter)
+    .sort((a, b) => String(b.payload.createdAt ?? '').localeCompare(String(a.payload.createdAt ?? '')));
+
+    res.json({ data: items });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// POST /api/knowledge — create knowledge item (auto-embeds)
+// POST /api/knowledge — create a knowledge item from text (auto-chunks + embeds)
 knowledgeRouter.post('/', async (req, res) => {
   try {
     const tenantId = req.auth!.tenantId;
@@ -57,69 +224,99 @@ knowledgeRouter.post('/', async (req, res) => {
     const collection = await resolveCollection(agentId, tenantId);
     if (!collection) { res.status(404).json({ error: 'Agente não encontrado' }); return; }
 
-    const embRes = await fetch('https://openrouter.ai/api/v1/embeddings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.openrouter.apiKey}` },
-      body: JSON.stringify({ model: config.openrouter.embeddingModel, input: `${title}: ${text}` }),
-    });
-    const embData = await embRes.json() as { data?: { embedding: number[] }[] };
-    const vector = embData.data?.[0]?.embedding;
-    if (!vector) { res.status(500).json({ error: 'Falha ao gerar embedding' }); return; }
-
-    const pointId = Date.now();
-    const payload = {
-      title, text,
-      category: category ?? 'general',
-      agentId,
-      tenantId,
-      createdAt: new Date().toISOString(),
-    };
-
-    await fetch(`${qdrantBase}/collections/${collection}/points`, {
-      method: 'PUT',
-      headers: qdrantHeaders(),
-      body: JSON.stringify({ points: [{ id: pointId, vector, payload }] }),
-    });
-    res.status(201).json({ id: pointId, payload });
+    const groupId = randomUUID();
+    const points = await buildPoints(groupId, text, { title, category: category ?? 'general', agentId, tenantId, source: 'text' });
+    await upsertPoints(collection, points);
+    res.status(201).json({ id: groupId, chunkCount: points.length });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// PUT /api/knowledge/:id?agentId= — update payload (no re-embedding)
-knowledgeRouter.put('/:id', async (req, res) => {
+// POST /api/knowledge/upload — create from a file (PDF/DOCX/TXT/MD) sent as base64
+knowledgeRouter.post('/upload', async (req, res) => {
+  try {
+    const tenantId = req.auth!.tenantId;
+    const { agentId, category, fileName, fileBase64, title } = req.body as Record<string, string>;
+    if (!agentId || !fileName || !fileBase64) {
+      res.status(400).json({ error: 'agentId, fileName e fileBase64 são obrigatórios' }); return;
+    }
+    const collection = await resolveCollection(agentId, tenantId);
+    if (!collection) { res.status(404).json({ error: 'Agente não encontrado' }); return; }
+
+    const buffer = Buffer.from(fileBase64.replace(/^data:[^,]*,/, ''), 'base64');
+    const ext = (fileName.split('.').pop() ?? '').toLowerCase();
+
+    let text = '';
+    if (ext === 'pdf') {
+      const parser = new PDFParse({ data: buffer });
+      const result = await parser.getText();
+      text = result.text ?? '';
+    } else if (ext === 'docx') {
+      const result = await mammoth.extractRawText({ buffer });
+      text = result.value ?? '';
+    } else if (ext === 'txt' || ext === 'md' || ext === 'markdown') {
+      text = buffer.toString('utf8');
+    } else {
+      res.status(400).json({ error: 'Formato não suportado. Envie PDF, DOCX, TXT ou MD.' }); return;
+    }
+
+    text = text.trim();
+    if (!text) { res.status(422).json({ error: 'Não foi possível extrair texto deste arquivo.' }); return; }
+
+    const groupId = randomUUID();
+    const itemTitle = (title && title.trim()) || fileName.replace(/\.[^.]+$/, '');
+    const points = await buildPoints(groupId, text, {
+      title: itemTitle, category: category ?? 'general', agentId, tenantId, source: 'file', fileName,
+    });
+    await upsertPoints(collection, points);
+    res.status(201).json({ id: groupId, chunkCount: points.length, title: itemTitle });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// PUT /api/knowledge/:groupId?agentId= — re-chunk AND re-embed (replaces the item's points)
+knowledgeRouter.put('/:groupId', async (req, res) => {
   try {
     const tenantId = req.auth!.tenantId;
     const agentId = String(req.query.agentId ?? req.body.agentId ?? '');
     const collection = await resolveCollection(agentId, tenantId);
     if (!collection) { res.status(404).json({ error: 'Agente não encontrado' }); return; }
 
-    const { title, text, category } = req.body as Record<string, string>;
-    const payload: Record<string, string> = {};
-    if (title) payload.title = title;
-    if (text) payload.text = text;
-    if (category) payload.category = category;
+    const groupId = req.params.groupId;
+    const points = await scrollPoints(collection, agentId);
+    const existing = points
+      .filter(p => String(p.payload?.groupId ?? p.id) === groupId)
+      .sort((a, b) => Number(a.payload?.chunkIndex ?? 0) - Number(b.payload?.chunkIndex ?? 0));
+    if (existing.length === 0) { res.status(404).json({ error: 'Item não encontrado' }); return; }
 
-    await fetch(`${qdrantBase}/collections/${collection}/points/payload`, {
-      method: 'POST',
-      headers: qdrantHeaders(),
-      body: JSON.stringify({ payload, points: [Number(req.params.id)] }),
+    const head = existing[0].payload ?? {};
+    const { title, text, category } = req.body as Record<string, string>;
+    const newTitle = title ?? String(head.title ?? '');
+    const newCategory = category ?? String(head.category ?? 'general');
+    const newText = (text ?? (head.fullText as string) ?? existing.map(p => String(p.payload?.text ?? '')).join('\n\n')).trim();
+    if (!newText) { res.status(400).json({ error: 'Conteúdo vazio.' }); return; }
+
+    // Replace: delete old chunk-points, insert freshly chunked + re-embedded ones (same groupId).
+    const newPoints = await buildPoints(groupId, newText, {
+      title: newTitle, category: newCategory, agentId, tenantId,
+      source: (head.source as 'text' | 'file') ?? 'text',
+      fileName: head.fileName as string | undefined,
+      createdAt: head.createdAt as string | undefined,
     });
-    res.json({ ok: true });
+    await deletePoints(collection, existing.map(p => p.id));
+    await upsertPoints(collection, newPoints);
+    res.json({ ok: true, chunkCount: newPoints.length });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
-// DELETE /api/knowledge/:id?agentId=
-knowledgeRouter.delete('/:id', async (req, res) => {
+// DELETE /api/knowledge/:groupId?agentId= — remove all chunk-points of the item
+knowledgeRouter.delete('/:groupId', async (req, res) => {
   try {
     const tenantId = req.auth!.tenantId;
     const agentId = String(req.query.agentId ?? '');
     const collection = await resolveCollection(agentId, tenantId);
     if (!collection) { res.status(404).json({ error: 'Agente não encontrado' }); return; }
 
-    await fetch(`${qdrantBase}/collections/${collection}/points/delete`, {
-      method: 'POST',
-      headers: qdrantHeaders(),
-      body: JSON.stringify({ points: [Number(req.params.id)] }),
-    });
+    const ids = await groupPointIds(collection, agentId, req.params.groupId);
+    await deletePoints(collection, ids);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });

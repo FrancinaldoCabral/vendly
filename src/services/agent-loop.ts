@@ -459,10 +459,14 @@ async function executeBuscarMemoria(
           },
         }),
       });
-      const qd = await qr.json() as { result?: Array<{ score?: number; payload?: { content?: string; text?: string } }> };
+      const qd = await qr.json() as { result?: Array<{ score?: number; payload?: { title?: string; content?: string; text?: string } }> };
       const hits = (qd.result ?? [])
         .filter(r => (r.score ?? 0) >= 0.35)
-        .map(r => r.payload?.content || r.payload?.text || '')
+        .map(r => {
+          const p = r.payload ?? {};
+          const body = p.content || p.text || '';
+          return body && p.title ? `${p.title}: ${body}` : body;
+        })
         .filter(Boolean);
       return hits.length > 0 ? hits.join('\n\n') : 'Nenhuma informação relevante encontrada.';
     } finally { clearTimeout(qt); }

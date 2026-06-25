@@ -94,7 +94,7 @@ export interface Agent {
 }
 
 export interface KnowledgePoint {
-  id: number;
+  id: string; // logical item id (groupId)
   payload: {
     title: string;
     text: string;
@@ -102,6 +102,9 @@ export interface KnowledgePoint {
     agentId: string;
     tenantId: string;
     createdAt?: string;
+    chunkCount?: number;
+    source?: 'text' | 'file';
+    fileName?: string;
   };
 }
 

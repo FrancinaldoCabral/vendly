@@ -96,10 +96,12 @@ export const api = {
     return req<{ data: KnowledgePoint[] }>(`/knowledge?${q}`);
   },
   createKnowledge: (data: { title: string; text: string; category?: string; agentId: string }) =>
-    req<{ id: number; payload: KnowledgePoint['payload'] }>('/knowledge', { method: 'POST', body: JSON.stringify(data) }),
-  updateKnowledge: (id: number, agentId: string, data: { title?: string; text?: string; category?: string }) =>
+    req<{ id: string; chunkCount: number }>('/knowledge', { method: 'POST', body: JSON.stringify(data) }),
+  uploadKnowledge: (data: { agentId: string; fileName: string; fileBase64: string; category?: string; title?: string }) =>
+    req<{ id: string; chunkCount: number; title: string }>('/knowledge/upload', { method: 'POST', body: JSON.stringify(data) }),
+  updateKnowledge: (id: string, agentId: string, data: { title?: string; text?: string; category?: string }) =>
     req<{ ok: boolean }>(`/knowledge/${id}?agentId=${agentId}`, { method: 'PUT', body: JSON.stringify(data) }),
-  deleteKnowledge: (id: number, agentId: string) =>
+  deleteKnowledge: (id: string, agentId: string) =>
     req<{ ok: boolean }>(`/knowledge/${id}?agentId=${agentId}`, { method: 'DELETE' }),
 
   // Scheduled posts
