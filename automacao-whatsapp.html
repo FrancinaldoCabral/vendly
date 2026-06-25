@@ -1,0 +1,598 @@
+<!--
+  PÁGINA DE VENDAS — Automação de WhatsApp com IA (Vendly / RedaTudo)
+  URL: redatudo.online/automacao-whatsapp
+  Cole este conteúdo no editor da página (modo HTML), igual ao home-redatudo.
+
+  Links já configurados:
+  - Assinar:  https://redatudo.online/?add-to-cart=36779  (produto 36779 do .env)
+  - Já sou assinante:  https://dash.vendly.chat/
+
+  >>> ÚNICO AJUSTE PENDENTE: o preço na seção de oferta (procure por "PREÇO-EDITAR").
+-->
+
+<div class="container py-5 text-center text-light position-relative wa-hero-bg">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+
+    body {
+      background: #0F0F1A;
+      font-family: 'Inter', sans-serif;
+      overflow-x: hidden;
+    }
+
+    .wa-hero-bg {
+      min-height: 88vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      position: relative;
+      z-index: 1;
+    }
+
+    .wa-hero-glow {
+      position: absolute;
+      top: -120px;
+      left: 50%;
+      width: 850px;
+      height: 850px;
+      background: radial-gradient(circle, rgba(16,185,129,0.16) 0%, rgba(124,58,237,0.10) 45%, transparent 70%);
+      transform: translateX(-50%);
+      z-index: 0;
+      filter: blur(100px);
+      animation: waPulse 8s ease-in-out infinite;
+      pointer-events: none;
+    }
+
+    @keyframes waPulse {
+      0%, 100% { opacity: 0.5; transform: translateX(-50%) scale(1); }
+      50% { opacity: 0.85; transform: translateX(-50%) scale(1.1); }
+    }
+
+    .wa-badge {
+      background: linear-gradient(135deg, #D1FAE5, #A7F3D0);
+      color: #065F46;
+      padding: 0.75rem 1.5rem;
+      border-radius: 30px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      margin-bottom: 2rem;
+      border: 2px solid #6EE7B7;
+      position: relative;
+      z-index: 2;
+      font-family: 'Inter', sans-serif;
+    }
+
+    .wa-title {
+      color: #FFFFFF;
+      font-size: clamp(2rem, 5vw, 3.75rem);
+      font-weight: 800;
+      line-height: 1.13;
+      margin-bottom: 1.5rem;
+      letter-spacing: -0.02em;
+      font-family: 'Outfit', sans-serif;
+      position: relative;
+      z-index: 2;
+      max-width: 950px;
+    }
+
+    .grad-green { background: linear-gradient(135deg, #34D399 0%, #10B981 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .grad-purple { background: linear-gradient(135deg, #A78BFA 0%, #60A5FA 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+
+    .wa-subtitle {
+      color: #D1D5DB;
+      font-size: clamp(1.1rem, 2.5vw, 1.35rem);
+      font-weight: 400;
+      margin-bottom: 2rem;
+      line-height: 1.6;
+      max-width: 720px;
+      position: relative;
+      z-index: 2;
+      font-family: 'Inter', sans-serif;
+    }
+
+    .wa-typed-container {
+      margin-bottom: 2.5rem;
+      min-height: 56px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      position: relative;
+      z-index: 2;
+    }
+
+    .wa-typed {
+      font-size: clamp(1rem, 2vw, 1.25rem);
+      font-weight: 600;
+      background: linear-gradient(92deg, #34D399 0%, #10B981 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      font-family: 'Outfit', sans-serif;
+      letter-spacing: 0.3px;
+      white-space: pre-line;
+      word-break: break-word;
+      max-width: 90vw;
+      padding-right: 8px;
+      border-right: 3px solid #10B981;
+      animation: waBlink 1s steps(1) infinite;
+    }
+
+    @keyframes waBlink { 0%,100%{border-color:#10B981;} 50%{border-color:transparent;} }
+
+    .wa-cta-buttons {
+      display: flex;
+      justify-content: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-bottom: 2.5rem;
+      position: relative;
+      z-index: 2;
+    }
+
+    .wa-btn-primary {
+      background: linear-gradient(135deg, #10B981 0%, #059669 100%);
+      color: #FFFFFF;
+      padding: 1rem 2.5rem;
+      font-weight: 700;
+      border-radius: 12px;
+      border: none;
+      text-decoration: none;
+      font-size: 1.125rem;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 4px 16px rgba(16, 185, 129, 0.35);
+      position: relative;
+      overflow: hidden;
+    }
+    .wa-btn-primary::before {
+      content: ''; position: absolute; top: 0; left: -100%; width: 100%; height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+      transition: left 0.5s;
+    }
+    .wa-btn-primary:hover::before { left: 100%; }
+    .wa-btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(16,185,129,0.45); color:#fff; text-decoration:none; }
+
+    .wa-btn-secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: #FFFFFF;
+      padding: 1rem 2.5rem;
+      font-weight: 600;
+      border-radius: 12px;
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      text-decoration: none;
+      font-size: 1.125rem;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.3s;
+      backdrop-filter: blur(10px);
+    }
+    .wa-btn-secondary:hover { background: rgba(255,255,255,0.14); border-color: rgba(255,255,255,0.3); color:#fff; text-decoration:none; }
+
+    .wa-hero-note { color: #9CA3AF; font-size: 0.9rem; position: relative; z-index: 2; font-family: 'Inter', sans-serif; }
+
+    .wa-hero-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 2rem;
+      max-width: 800px;
+      width: 100%;
+      position: relative;
+      z-index: 2;
+      margin-top: 2.5rem;
+    }
+    .wa-stat { display: flex; flex-direction: column; gap: 0.4rem; }
+    .wa-stat strong { font-size: 2.4rem; color: #34D399; font-weight: 700; font-family: 'Outfit', sans-serif; }
+    .wa-stat span { color: #D1D5DB; font-size: 0.875rem; }
+
+    @media (max-width: 768px) {
+      .wa-badge { font-size: 0.85rem; padding: 0.6rem 1.2rem; }
+      .wa-typed { font-size: 1rem; }
+      .wa-cta-buttons { flex-direction: column; width: 100%; max-width: 400px; }
+      .wa-btn-primary, .wa-btn-secondary { width: 100%; }
+      .wa-hero-stats { grid-template-columns: 1fr; gap: 1.5rem; }
+    }
+  </style>
+
+  <div class="wa-hero-glow"></div>
+
+  <div class="wa-badge">
+    🤖 Automação de Atendimento com IA • Funciona 24 horas
+  </div>
+
+  <h1 class="wa-title">
+    Seu <span class="grad-green">WhatsApp atendendo e vendendo</span><br>
+    sozinho, com a <span class="grad-purple">cara do seu negócio</span>
+  </h1>
+
+  <div class="wa-subtitle">
+    Conecte seu número, crie um agente de IA com a sua personalidade e deixe ele
+    responder clientes, tirar dúvidas e fechar vendas — no privado e em grupos, dia e noite.
+  </div>
+
+  <div class="wa-typed-container">
+    <span class="wa-typed" id="waTyped"></span>
+  </div>
+
+  <div class="wa-cta-buttons">
+    <a href="https://redatudo.online/?add-to-cart=36779" class="wa-btn-primary">
+      Ativar minha automação
+    </a>
+    <a href="#como-funciona" class="wa-btn-secondary">
+      Ver como funciona
+    </a>
+  </div>
+
+  <p class="wa-hero-note">⚡ Ativação em minutos • Sem instalar nada • Use seu próprio número</p>
+
+  <div class="wa-hero-stats">
+    <div class="wa-stat"><strong>24/7</strong><span>atendimento sem parar</span></div>
+    <div class="wa-stat"><strong>&lt;5s</strong><span>tempo médio de resposta</span></div>
+    <div class="wa-stat"><strong>∞</strong><span>conversas simultâneas</span></div>
+  </div>
+
+  <script>
+    (function () {
+      var phrases = [
+        "💬 Responde clientes em segundos, a qualquer hora",
+        "🛒 Tira dúvidas e conduz até a venda",
+        "🎧 Entende e responde áudios naturalmente",
+        "👥 Atende em grupos quando é mencionado",
+        "🏷️ Organiza seus contatos no CRM automaticamente",
+        "📅 Publica postagens e ofertas no horário certo",
+        "🙋 Chama você quando o cliente precisa de um humano"
+      ];
+      var el = document.getElementById("waTyped");
+      var pi = 0, ci = 0, typing = true;
+      function loop() {
+        var cur = phrases[pi];
+        if (typing) {
+          el.textContent = cur.substring(0, ci++);
+          if (ci > cur.length) { typing = false; setTimeout(loop, 1800); }
+          else setTimeout(loop, 50);
+        } else {
+          el.textContent = cur.substring(0, ci--);
+          if (ci < 0) { typing = true; pi = (pi + 1) % phrases.length; setTimeout(loop, 400); }
+          else setTimeout(loop, 25);
+        }
+      }
+      loop();
+    })();
+  </script>
+</div>
+
+<!-- ============================ DOR / PROBLEMA ============================ -->
+<section class="wa-pain-section py-5" id="problema">
+  <style>
+    .wa-pain-section { background: #161622; border-top: 1px solid #374151; position: relative; z-index: 1; }
+    .wa-section-header { text-align: center; margin-bottom: 3.5rem; }
+    .wa-section-badge {
+      display: inline-block; background: rgba(167,139,250,0.15); color: #C4B5FD;
+      padding: 0.5rem 1rem; border-radius: 20px; font-size: 0.875rem; font-weight: 600;
+      margin-bottom: 1rem; border: 1px solid rgba(167,139,250,0.3); font-family: 'Inter', sans-serif;
+    }
+    .wa-section-title {
+      font-size: clamp(2rem, 4vw, 3rem); font-weight: 700; margin-bottom: 1rem; color: #fff;
+      font-family: 'Outfit', sans-serif; letter-spacing: -0.02em;
+    }
+    .wa-section-subtitle { font-size: 1.2rem; color: #E5E7EB; max-width: 720px; margin: 0 auto; font-family: 'Inter', sans-serif; }
+    .wa-pain-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem; max-width: 1100px; margin: 0 auto; padding: 0 1rem; }
+    .wa-pain-card {
+      background: linear-gradient(145deg, #1F2937 0%, #111827 100%); border: 2px solid #374151;
+      border-radius: 18px; padding: 1.75rem; transition: all 0.3s;
+    }
+    .wa-pain-card:hover { border-color: #DC2626; transform: translateY(-3px); box-shadow: 0 12px 28px rgba(220,38,38,0.18); }
+    .wa-pain-icon { font-size: 2rem; margin-bottom: 0.75rem; }
+    .wa-pain-card h3 { font-family: 'Outfit', sans-serif; font-weight: 700; font-size: 1.2rem; color: #fff; margin-bottom: 0.5rem; }
+    .wa-pain-card p { color: #D1D5DB; font-size: 1rem; line-height: 1.6; margin: 0; font-family: 'Inter', sans-serif; }
+    @media (max-width:768px){ .wa-pain-grid{ grid-template-columns:1fr; } }
+  </style>
+  <div class="container px-3">
+    <div class="wa-section-header">
+      <span class="wa-section-badge">😴 ENQUANTO VOCÊ NÃO RESPONDE…</span>
+      <h2 class="wa-section-title">Cada mensagem sem resposta é uma venda perdida</h2>
+      <p class="wa-section-subtitle">O cliente não espera. Se você demora, ele compra do concorrente que respondeu primeiro.</p>
+    </div>
+    <div class="wa-pain-grid">
+      <div class="wa-pain-card"><div class="wa-pain-icon">⏰</div><h3>Mensagens fora do horário</h3><p>Clientes chamam de madrugada, no fim de semana, no feriado — e ficam sem resposta até você voltar.</p></div>
+      <div class="wa-pain-card"><div class="wa-pain-icon">🔁</div><h3>Sempre as mesmas perguntas</h3><p>Preço, prazo, formas de pagamento, “tem disponível?”. Você repete o dia todo o que a IA poderia responder.</p></div>
+      <div class="wa-pain-card"><div class="wa-pain-icon">📉</div><h3>Lead esfria rápido</h3><p>Quem manda mensagem quer resposta agora. Minutos de atraso já derrubam a sua taxa de conversão.</p></div>
+      <div class="wa-pain-card"><div class="wa-pain-icon">🧠</div><h3>Tudo depende de você</h3><p>Sair de férias ou ficar doente significa o atendimento parar. O negócio não escala preso à sua agenda.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ COMO FUNCIONA ============================ -->
+<section class="wa-steps-section py-5" id="como-funciona">
+  <style>
+    .wa-steps-section { background: #0F0F1A; border-top: 1px solid #374151; }
+    .wa-steps-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 2rem; max-width: 1150px; margin: 0 auto; padding: 0 1rem; }
+    .wa-step {
+      background: linear-gradient(145deg, #1F2937 0%, #111827 100%); border: 2px solid #374151;
+      border-radius: 20px; padding: 2rem 1.75rem; position: relative; transition: all 0.3s;
+    }
+    .wa-step:hover { border-color: #7C3AED; transform: translateY(-4px); box-shadow: 0 16px 32px rgba(124,58,237,0.25); }
+    .wa-step-num {
+      width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #A78BFA, #60A5FA);
+      display: flex; align-items: center; justify-content: center; font-family: 'Outfit', sans-serif;
+      font-weight: 800; font-size: 1.25rem; color: #fff; margin-bottom: 1.25rem; box-shadow: 0 8px 20px rgba(124,58,237,0.4);
+    }
+    .wa-step h3 { font-family: 'Outfit', sans-serif; font-weight: 700; font-size: 1.3rem; color: #fff; margin-bottom: 0.6rem; }
+    .wa-step p { color: #D1D5DB; font-size: 1.05rem; line-height: 1.65; margin: 0; font-family: 'Inter', sans-serif; }
+    @media (max-width:768px){ .wa-steps-grid{ grid-template-columns:1fr; } }
+  </style>
+  <div class="container px-3">
+    <div class="wa-section-header">
+      <span class="wa-section-badge">🚀 SIMPLES DE COMEÇAR</span>
+      <h2 class="wa-section-title">No ar em <span class="grad-purple">3 passos</span></h2>
+      <p class="wa-section-subtitle">Sem programação, sem instalar app, sem trocar de número.</p>
+    </div>
+    <div class="wa-steps-grid">
+      <div class="wa-step">
+        <div class="wa-step-num">1</div>
+        <h3>Conecte seu WhatsApp</h3>
+        <p>Escaneie um QR code com o número do seu negócio. Pronto: o agente já está ligado ao seu WhatsApp.</p>
+      </div>
+      <div class="wa-step">
+        <div class="wa-step-num">2</div>
+        <h3>Crie o seu agente</h3>
+        <p>Descreva a personalidade, o que ele pode fazer e suba sua base de conhecimento (catálogo, preços, regras).</p>
+      </div>
+      <div class="wa-step">
+        <div class="wa-step-num">3</div>
+        <h3>Deixe a IA atender</h3>
+        <p>Ele responde sozinho 24h, organiza os contatos e chama você só quando precisa de um humano.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ RECURSOS ============================ -->
+<section class="wa-features-section py-5" id="recursos">
+  <style>
+    .wa-features-section { background: #161622; border-top: 1px solid #374151; }
+    .wa-features-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.75rem; max-width: 1300px; margin: 0 auto; padding: 1rem; }
+    .wa-feature {
+      background: linear-gradient(145deg, rgba(31,41,55,0.6) 0%, rgba(17,24,39,0.6) 100%);
+      backdrop-filter: blur(20px); border: 2px solid rgba(75,85,99,0.35); border-radius: 22px;
+      padding: 1.85rem; transition: all 0.3s;
+    }
+    .wa-feature:hover { border-color: var(--c, #7C3AED); transform: translateY(-5px); box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
+    .wa-feature-icon {
+      width: 60px; height: 60px; border-radius: 16px; background: var(--c, #7C3AED);
+      display: flex; align-items: center; justify-content: center; font-size: 1.9rem; margin-bottom: 1.2rem;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.4);
+    }
+    .wa-feature h3 { font-family: 'Outfit', sans-serif; font-weight: 700; font-size: 1.35rem; color: #fff; margin-bottom: 0.6rem; }
+    .wa-feature p { color: #D1D5DB; font-size: 1.02rem; line-height: 1.65; margin: 0; font-family: 'Inter', sans-serif; }
+    @media (max-width:768px){ .wa-features-grid{ grid-template-columns:1fr; } }
+  </style>
+  <div class="container px-3">
+    <div class="wa-section-header">
+      <span class="wa-section-badge">⚙️ TUDO QUE O SEU AGENTE FAZ</span>
+      <h2 class="wa-section-title">Muito além de respostas automáticas</h2>
+      <p class="wa-section-subtitle">Um atendente de IA completo, treinado no seu negócio e integrado ao seu fluxo.</p>
+    </div>
+    <div class="wa-features-grid">
+      <div class="wa-feature" style="--c:#10B981;">
+        <div class="wa-feature-icon">💬</div>
+        <h3>Atendimento 24/7</h3>
+        <p>Responde toda mensagem na hora, sem fila e sem horário. Quantas conversas vierem, ao mesmo tempo.</p>
+      </div>
+      <div class="wa-feature" style="--c:#7C3AED;">
+        <div class="wa-feature-icon">🎭</div>
+        <h3>A personalidade do seu negócio</h3>
+        <p>Você define o tom, o que ele pode (e não pode) dizer. Soa como a sua marca — não como um robô genérico.</p>
+      </div>
+      <div class="wa-feature" style="--c:#3B82F6;">
+        <div class="wa-feature-icon">📚</div>
+        <h3>Treinado nos seus dados</h3>
+        <p>Suba catálogo, preços, políticas e FAQs. Ele responde com base no que é verdade no seu negócio.</p>
+      </div>
+      <div class="wa-feature" style="--c:#F59E0B;">
+        <div class="wa-feature-icon">🎧</div>
+        <h3>Entende e envia áudio</h3>
+        <p>O cliente manda áudio, ele entende. E responde em áudio quando faz sentido — conversa natural de verdade.</p>
+      </div>
+      <div class="wa-feature" style="--c:#06B6D4;">
+        <div class="wa-feature-icon">👥</div>
+        <h3>Funciona em grupos</h3>
+        <p>Responde quando é mencionado ou quando respondem suas mensagens — sem se intrometer no resto da conversa.</p>
+      </div>
+      <div class="wa-feature" style="--c:#EC4899;">
+        <div class="wa-feature-icon">🏷️</div>
+        <h3>Organiza seu CRM</h3>
+        <p>Marca e classifica contatos com etiquetas automaticamente, mantendo seu funil sempre atualizado.</p>
+      </div>
+      <div class="wa-feature" style="--c:#8B5CF6;">
+        <div class="wa-feature-icon">📅</div>
+        <h3>Postagens agendadas</h3>
+        <p>Programe mensagens, ofertas e imagens geradas por IA para contatos, grupos e status — no horário certo.</p>
+      </div>
+      <div class="wa-feature" style="--c:#14B8A6;">
+        <div class="wa-feature-icon">🔔</div>
+        <h3>Notificações inteligentes</h3>
+        <p>Dispara avisos para um contato ou grupo quando algo importante acontece na conversa.</p>
+      </div>
+      <div class="wa-feature" style="--c:#F43F5E;">
+        <div class="wa-feature-icon">🙋</div>
+        <h3>Passa para um humano</h3>
+        <p>Quando o caso é sensível, ele transfere para você e avisa — sem deixar o cliente na mão.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ PARA QUEM ============================ -->
+<section class="wa-cases-section py-5" id="para-quem">
+  <style>
+    .wa-cases-section { background: #0F0F1A; border-top: 1px solid #374151; }
+    .wa-cases-title { font-size: clamp(2rem, 4vw, 3rem); font-family: 'Outfit', sans-serif; font-weight: 700; text-align: center; margin-bottom: 3rem; color: #fff; letter-spacing: -0.02em; }
+    .wa-cases-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 2rem; max-width: 1200px; margin: 0 auto; padding: 0 1rem; }
+    .wa-case {
+      background: linear-gradient(145deg, #1F2937 0%, #111827 100%); border: 2px solid #374151;
+      border-radius: 20px; padding: 2rem 1.5rem; transition: all 0.3s; position: relative; overflow: hidden;
+    }
+    .wa-case::before { content:''; position:absolute; top:0; left:0; width:4px; height:100%; background: linear-gradient(180deg,#10B981,#7C3AED); opacity:0; transition:opacity 0.3s; }
+    .wa-case:hover::before { opacity:1; }
+    .wa-case:hover { transform: translateY(-4px); box-shadow: 0 12px 28px rgba(16,185,129,0.22); border-color:#10B981; }
+    .wa-case-icon { font-size: 2.4rem; margin-bottom: 1rem; }
+    .wa-case h3 { font-size: 1.3rem; color: #fff; font-family: 'Outfit', sans-serif; font-weight: 700; margin-bottom: 0.7rem; }
+    .wa-case p { color: #F3F4F6; font-size: 1.05rem; line-height: 1.7; font-family: 'Inter', sans-serif; margin: 0; }
+    .wa-case strong { color: #34D399; font-weight: 600; }
+    @media (max-width:768px){ .wa-cases-grid{ grid-template-columns:1fr; } }
+  </style>
+  <div class="container px-3">
+    <h2 class="wa-cases-title">Feito para quem <span class="grad-green">vive do WhatsApp</span></h2>
+    <div class="wa-cases-grid">
+      <div class="wa-case"><div class="wa-case-icon">🛍️</div><h3>Lojas e e-commerce</h3><p><strong>Atenda e venda no chat:</strong> tira dúvidas de produto, informa preço e estoque e conduz o cliente até a compra.</p></div>
+      <div class="wa-case"><div class="wa-case-icon">📅</div><h3>Clínicas e serviços</h3><p><strong>Agende sem secretária ocupada:</strong> responde dúvidas, informa horários e organiza os contatos no CRM.</p></div>
+      <div class="wa-case"><div class="wa-case-icon">🎓</div><h3>Infoprodutores e mentores</h3><p><strong>Suporte e vendas no automático:</strong> responde alunos, tira dúvidas do curso e divulga ofertas em grupos.</p></div>
+      <div class="wa-case"><div class="wa-case-icon">🍔</div><h3>Restaurantes e delivery</h3><p><strong>Pedidos sem perder cliente:</strong> apresenta o cardápio, responde no horário de pico e avisa você quando precisa.</p></div>
+      <div class="wa-case"><div class="wa-case-icon">🏠</div><h3>Imobiliárias e corretores</h3><p><strong>Qualifique leads 24h:</strong> responde sobre imóveis, entende o que o cliente procura e passa os quentes para você.</p></div>
+      <div class="wa-case"><div class="wa-case-icon">💼</div><h3>Agências e prestadores</h3><p><strong>Atenda mais clientes:</strong> um agente por cliente, cada um com sua persona e base de conhecimento.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ DEPOIMENTOS ============================ -->
+<section class="wa-reviews-section py-5" id="depoimentos">
+  <style>
+    .wa-reviews-section { background: #161622; border-top: 1px solid #374151; }
+    .wa-reviews-title { font-size: clamp(2rem, 4vw, 2.5rem); font-family: 'Outfit', sans-serif; font-weight: 700; text-align: center; margin-bottom: 3rem; color: #fff; letter-spacing: -0.02em; }
+    .wa-reviews-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 2rem; max-width: 1200px; margin: 0 auto; padding: 0 1rem; }
+    .wa-review { background: linear-gradient(145deg, #1F2937 0%, #111827 100%); border-radius: 20px; border: 2px solid #374151; padding: 2rem; transition: all 0.3s; }
+    .wa-review:hover { transform: translateY(-4px); box-shadow: 0 12px 28px rgba(59,130,246,0.25); border-color: #3B82F6; }
+    .wa-review-stars { color: #FBBF24; font-size: 1.25rem; margin-bottom: 1rem; letter-spacing: 0.1em; }
+    .wa-review-txt { font-size: 1.05rem; color: #F9FAFB; margin-bottom: 1.5rem; font-family: 'Inter', sans-serif; line-height: 1.8; }
+    .wa-review-user { display: flex; align-items: center; gap: 0.75rem; font-family: 'Inter', sans-serif; color: #E5E7EB; }
+    .wa-review-avatar { width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #10B981, #3B82F6); display: flex; justify-content: center; align-items: center; color: #fff; font-size: 1.25rem; font-weight: 700; font-family: 'Outfit', sans-serif; border: 3px solid #111827; box-shadow: 0 4px 12px rgba(16,185,129,0.4); }
+    .wa-review-name { font-weight: 600; color: #fff; }
+    .wa-review-role { font-size: 0.875rem; color: #D1D5DB; }
+    @media (max-width:768px){ .wa-reviews-grid{ grid-template-columns:1fr; } }
+  </style>
+  <div class="container px-3">
+    <h2 class="wa-reviews-title">Quem ativou, <span class="grad-purple">não atende mais sozinho</span></h2>
+    <div class="wa-reviews-grid">
+      <div class="wa-review">
+        <div class="wa-review-stars">★★★★★</div>
+        <div class="wa-review-txt">"Antes eu perdia venda de madrugada. Agora o agente responde na hora, manda o preço e quando o cliente está quente ele me chama. Minha conversão subiu muito."</div>
+        <div class="wa-review-user"><span class="wa-review-avatar">F</span><div><div class="wa-review-name">Fernanda Lima</div><div class="wa-review-role">Loja de cosméticos</div></div></div>
+      </div>
+      <div class="wa-review">
+        <div class="wa-review-stars">★★★★★</div>
+        <div class="wa-review-txt">"Configurei a personalidade e subi meu catálogo. Ele responde igual a mim, no meu jeito. Os clientes nem percebem que é IA até eu falar."</div>
+        <div class="wa-review-user"><span class="wa-review-avatar">R</span><div><div class="wa-review-name">Rodrigo Martins</div><div class="wa-review-role">Mentor / Infoprodutor</div></div></div>
+      </div>
+      <div class="wa-review">
+        <div class="wa-review-stars">★★★★★</div>
+        <div class="wa-review-txt">"O atendimento em grupo foi o que me ganhou. Ele responde quando marcam ele e fica quieto no resto. E ainda entende os áudios dos clientes."</div>
+        <div class="wa-review-user"><span class="wa-review-avatar">P</span><div><div class="wa-review-name">Patrícia Souza</div><div class="wa-review-role">Clínica de estética</div></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ OFERTA / CTA ============================ -->
+<section class="wa-offer-section py-5" id="assinar">
+  <style>
+    .wa-offer-section { background: #0F0F1A; border-top: 1px solid #374151; }
+    .wa-offer-card {
+      max-width: 720px; margin: 0 auto; text-align: center; position: relative; overflow: hidden;
+      background: linear-gradient(145deg, #14202b 0%, #0d1422 100%);
+      border-radius: 28px; padding: 3rem 2.5rem;
+      border: 2px solid transparent;
+    }
+    .wa-offer-card::before {
+      content: ''; position: absolute; inset: 0; border-radius: 28px; padding: 2px;
+      background: linear-gradient(120deg, #10B981, #7C3AED, #3B82F6);
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none;
+    }
+    .wa-offer-glow { position: absolute; top: -40%; left: 50%; width: 500px; height: 500px; transform: translateX(-50%); background: radial-gradient(circle, rgba(16,185,129,0.2) 0%, transparent 70%); filter: blur(70px); pointer-events: none; }
+    .wa-offer-badge { display:inline-block; background: linear-gradient(135deg,#10B981,#059669); color:#fff; font-family:'Inter',sans-serif; font-weight:700; font-size:0.8rem; text-transform:uppercase; letter-spacing:0.5px; padding:6px 16px; border-radius:20px; margin-bottom:1.25rem; position:relative; z-index:1; }
+    .wa-offer-title { font-family:'Outfit',sans-serif; font-weight:800; font-size: clamp(1.75rem, 4vw, 2.6rem); color:#fff; line-height:1.2; margin-bottom:1rem; position:relative; z-index:1; }
+    .wa-offer-sub { color:#D1D5DB; font-size:1.15rem; line-height:1.6; max-width:520px; margin:0 auto 2rem; position:relative; z-index:1; font-family:'Inter',sans-serif; }
+    .wa-offer-list { list-style:none; padding:0; margin:0 auto 2.25rem; max-width:420px; text-align:left; position:relative; z-index:1; }
+    .wa-offer-list li { color:#E5E7EB; font-size:1.05rem; padding:0.5rem 0; font-family:'Inter',sans-serif; display:flex; gap:0.6rem; align-items:flex-start; }
+    .wa-offer-list li::before { content:'✓'; color:#34D399; font-weight:800; flex-shrink:0; }
+    .wa-price { position:relative; z-index:1; margin-bottom:1.75rem; }
+    .wa-price .amount { font-family:'Outfit',sans-serif; font-weight:800; font-size:3rem; color:#fff; }
+    .wa-price .period { color:#9CA3AF; font-size:1.1rem; }
+    .wa-offer-btn {
+      display:inline-block; position:relative; z-index:1;
+      background: linear-gradient(135deg,#10B981 0%,#059669 100%); color:#fff;
+      font-family:'Inter',sans-serif; font-weight:700; font-size:1.2rem;
+      padding:1.15rem 3rem; border-radius:14px; text-decoration:none;
+      box-shadow: 0 10px 30px rgba(16,185,129,0.4); transition: all 0.3s ease;
+    }
+    .wa-offer-btn:hover { transform: translateY(-3px) scale(1.02); filter: brightness(1.1); color:#fff; text-decoration:none; box-shadow:0 16px 40px rgba(16,185,129,0.5); }
+    .wa-offer-note { color:#9CA3AF; font-size:0.9rem; margin-top:1.25rem; position:relative; z-index:1; font-family:'Inter',sans-serif; }
+    .wa-offer-login { display:block; margin-top:1rem; color:#60A5FA; text-decoration:none; font-size:0.95rem; position:relative; z-index:1; }
+    .wa-offer-login:hover { color:#93C5FD; text-decoration:underline; }
+  </style>
+  <div class="container px-3">
+    <div class="wa-offer-card">
+      <div class="wa-offer-glow"></div>
+      <span class="wa-offer-badge">⚡ Ative hoje</span>
+      <h2 class="wa-offer-title">Comece a atender no automático ainda hoje</h2>
+      <p class="wa-offer-sub">Conecte seu WhatsApp, crie seu agente e deixe a IA trabalhar por você 24 horas por dia.</p>
+      <ul class="wa-offer-list">
+        <li>Atendimento com IA 24/7, no privado e em grupos</li>
+        <li>Agente com a personalidade e a base do seu negócio</li>
+        <li>Áudio, CRM, postagens agendadas e handoff humano</li>
+        <li>Ativação em minutos, usando o seu próprio número</li>
+      </ul>
+      <!-- PREÇO-EDITAR: ajuste o valor e o período conforme o seu plano -->
+      <div class="wa-price">
+        <span class="amount">R$ 97</span><span class="period">/mês</span>
+      </div>
+        <a href="https://redatudo.online/?add-to-cart=36779" class="wa-offer-btn">Ativar minha automação →</a>
+      <p class="wa-offer-note">Cancele quando quiser. Sem fidelidade.</p>
+      <a href="https://dash.vendly.chat/" class="wa-offer-login">Já sou assinante — acessar meu painel</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ FAQ ============================ -->
+<section class="wa-faq-section py-5" id="faq">
+  <style>
+    .wa-faq-section { background: #161622; border-top: 1px solid #374151; }
+    .wa-faq-wrap { max-width: 800px; margin: 0 auto; padding: 0 1rem; }
+    .wa-faq-item { background: linear-gradient(145deg, #1F2937 0%, #111827 100%); border: 2px solid #374151; border-radius: 16px; padding: 1.5rem 1.75rem; margin-bottom: 1rem; transition: all 0.3s; }
+    .wa-faq-item:hover { border-color: #7C3AED; }
+    .wa-faq-item h3 { font-family: 'Outfit', sans-serif; font-weight: 700; font-size: 1.15rem; color: #fff; margin-bottom: 0.6rem; display: flex; gap: 0.6rem; align-items: flex-start; }
+    .wa-faq-item h3::before { content: '❓'; flex-shrink: 0; }
+    .wa-faq-item p { color: #D1D5DB; font-size: 1.02rem; line-height: 1.65; margin: 0; font-family: 'Inter', sans-serif; }
+  </style>
+  <div class="container px-3">
+    <div class="wa-section-header">
+      <span class="wa-section-badge">💡 DÚVIDAS FREQUENTES</span>
+      <h2 class="wa-section-title">Perguntas que todo mundo faz</h2>
+    </div>
+    <div class="wa-faq-wrap">
+      <div class="wa-faq-item"><h3>Preciso trocar o meu número de WhatsApp?</h3><p>Não. Você conecta o seu número atual escaneando um QR code. O agente passa a atender pelo mesmo WhatsApp que você já usa.</p></div>
+      <div class="wa-faq-item"><h3>A IA responde igual a um robô?</h3><p>Não. Você define a personalidade, o tom e o que ela pode dizer, e ela responde com base nos dados do seu negócio. Soa como a sua marca.</p></div>
+      <div class="wa-faq-item"><h3>E quando o cliente precisa falar comigo?</h3><p>O agente identifica esses casos, transfere a conversa para você e te avisa. Você assume quando quiser, direto pela Central de Conversas.</p></div>
+      <div class="wa-faq-item"><h3>Funciona em grupos do WhatsApp?</h3><p>Sim. Ele responde quando é mencionado ou quando respondem às mensagens dele, sem interferir no restante da conversa do grupo.</p></div>
+      <div class="wa-faq-item"><h3>Preciso saber programar?</h3><p>Não. Toda a configuração é feita por um painel simples: criar o agente, escrever a persona, subir o conhecimento e ligar as ações.</p></div>
+      <div class="wa-faq-item"><h3>Em quanto tempo fica pronto?</h3><p>Em minutos. Conectou o WhatsApp e criou o agente, já está atendendo. Você refina a persona e a base conforme for usando.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ CTA FINAL ============================ -->
+<section class="wa-final-section py-5" id="comecar">
+  <style>
+    .wa-final-section { background: #0F0F1A; border-top: 1px solid #374151; text-align: center; }
+    .wa-final-title { font-family: 'Outfit', sans-serif; font-weight: 800; font-size: clamp(1.75rem, 4vw, 3rem); color: #fff; line-height: 1.2; margin-bottom: 1.25rem; }
+    .wa-final-sub { color: #D1D5DB; font-size: 1.2rem; max-width: 600px; margin: 0 auto 2rem; font-family: 'Inter', sans-serif; }
+  </style>
+  <div class="container px-3">
+    <h2 class="wa-final-title">Pare de perder venda por <span class="grad-green">falta de resposta</span></h2>
+    <p class="wa-final-sub">Seu próximo cliente já está digitando. Deixe a IA responder antes do concorrente.</p>
+    <div class="wa-cta-buttons" style="margin-bottom:0;">
+      <a href="https://redatudo.online/?add-to-cart=36779" class="wa-btn-primary">Ativar minha automação</a>
+      <a href="#recursos" class="wa-btn-secondary">Rever os recursos</a>
+    </div>
+  </div>
+</section>
