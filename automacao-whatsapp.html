@@ -3,10 +3,11 @@
   URL: redatudo.online/automacao-whatsapp
   Cole este conteúdo no editor da página (modo HTML), igual ao home-redatudo.
 
-  >>> AJUSTE ANTES DE PUBLICAR:
-  - Links de CTA "Assinar":  href="https://redatudo.online/?add-to-cart=36779"  (id do produto de assinatura)
-  - Link "Já sou assinante":  href="https://redatudo.online/minha-conta?login_app=chat"
-  - Preço na seção de oferta (procure por "PREÇO-EDITAR").
+  Links já configurados:
+  - Assinar:  https://redatudo.online/?add-to-cart=36779  (produto 36779 do .env)
+  - Já sou assinante:  https://dash.vendly.chat/
+
+  >>> ÚNICO AJUSTE PENDENTE: o preço na seção de oferta (procure por "PREÇO-EDITAR").
 -->
 
 <div class="container py-5 text-center text-light position-relative wa-hero-bg">
@@ -212,7 +213,6 @@
   </div>
 
   <div class="wa-cta-buttons">
-    <!-- AJUSTE: link de assinatura (add-to-cart do produto) -->
     <a href="https://redatudo.online/?add-to-cart=36779" class="wa-btn-primary">
       Ativar minha automação
     </a>
@@ -546,11 +546,9 @@
       <div class="wa-price">
         <span class="amount">R$ 97</span><span class="period">/mês</span>
       </div>
-      <!-- AJUSTE: link de assinatura (add-to-cart do produto) -->
-      <a href="https://redatudo.online/?add-to-cart=36779" class="wa-offer-btn">Ativar minha automação →</a>
+        <a href="https://redatudo.online/?add-to-cart=36779" class="wa-offer-btn">Ativar minha automação →</a>
       <p class="wa-offer-note">Cancele quando quiser. Sem fidelidade.</p>
-      <!-- AJUSTE: link do painel para quem já assina -->
-      <a href="https://redatudo.online/minha-conta?login_app=chat" class="wa-offer-login">Já sou assinante — acessar meu painel</a>
+      <a href="https://dash.vendly.chat/" class="wa-offer-login">Já sou assinante — acessar meu painel</a>
     </div>
   </div>
 </section>
@@ -593,7 +591,6 @@
     <h2 class="wa-final-title">Pare de perder venda por <span class="grad-green">falta de resposta</span></h2>
     <p class="wa-final-sub">Seu próximo cliente já está digitando. Deixe a IA responder antes do concorrente.</p>
     <div class="wa-cta-buttons" style="margin-bottom:0;">
-      <!-- AJUSTE: link de assinatura -->
       <a href="https://redatudo.online/?add-to-cart=36779" class="wa-btn-primary">Ativar minha automação</a>
       <a href="#recursos" class="wa-btn-secondary">Rever os recursos</a>
     </div>
