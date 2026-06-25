@@ -76,7 +76,6 @@ export interface Agent {
   tenantId: string;
   connectionId?: string;
   name: string;
-  assistantName?: string;
   evolutionInstance?: string;
   chatwootInboxId?: string;
   systemPrompt?: string;

@@ -42,7 +42,6 @@ export interface ProvisionAgentInput {
   tools?: string[];
   builtinTools?: string[];
   assets?: AgentDoc['assets'];
-  assistantName?: string;
   customApis?: unknown[];
   groupConfig?: { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean };
   contactFilter?: { mode: 'blacklist' | 'whitelist'; contacts: string[]; groups: string[] };
@@ -71,7 +70,6 @@ export interface AgentDoc {
   tenantId: string;
   connectionId: string;           // which WhatsApp connection this agent listens on
   name: string;
-  assistantName?: string;
   evolutionInstance: string;      // denormalized from the connection (keeps message flow simple)
   chatwootInboxId?: number;       // denormalized from the connection
   systemPrompt: string;
@@ -458,7 +456,6 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentD
     tenantId: input.tenantId,
     connectionId: connection._id,
     name: input.name,
-    assistantName: input.assistantName,
     evolutionInstance: connection.evolutionInstance,
     chatwootInboxId: connection.chatwootInboxId,
     systemPrompt: input.systemPrompt,

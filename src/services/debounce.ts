@@ -140,7 +140,6 @@ interface AgentDoc {
   evolutionInstance: string;
   chatwootInboxId?: number;
   systemPrompt: string;
-  assistantName?: string;
   model?: string;
   temperature?: number;
   maxIter?: number;

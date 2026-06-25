@@ -228,10 +228,9 @@ export default function Connections() {
                     const ab = agentBadge(a.status);
                     return (
                       <div key={a._id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid #f5f5f5' }}>
-                        <RobotOutlined style={{ fontSize: 18, color: '#0d9488' }} />
+                        <RobotOutlined style={{ fontSize: 18, color: '#7C3AED' }} />
                         <div style={{ flex: 1, minWidth: 160 }}>
                           <Text strong>{a.name}</Text>
-                          {a.assistantName && <Text type="secondary" style={{ fontSize: 13 }}> ({a.assistantName})</Text>}
                           <div style={{ marginTop: 2, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                             <Badge status={ab.color} text={ab.label} />
                             {a.contactFilter?.mode === 'whitelist'

@@ -606,7 +606,6 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
     if (agent) {
       form.setFieldsValue({
         name: agent.name,
-        assistantName: agent.assistantName,
         respondToMentions: agent.groupConfig?.respondToMentions ?? true,
         respondToReplies: agent.groupConfig?.respondToReplies ?? true,
         respondToAll: agent.groupConfig?.respondToAll ?? false,
@@ -632,7 +631,6 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
   function buildPayload(vals: Record<string, unknown>) {
     return {
       name: vals.name as string,
-      assistantName: vals.assistantName as string,
       systemPrompt: vals.systemPrompt as string,
       tools: [], // messaging is handled by the platform; no raw namespaces exposed to the LLM
       builtinTools,
@@ -703,11 +701,8 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
                 <Form.Item name="name" label="Nome do agente (só para você organizar)" rules={[{ required: true }]}>
                   <Input placeholder="Atendimento Vendas" />
                 </Form.Item>
-                <Form.Item name="assistantName" label="Como o agente se apresenta ao cliente">
-                  <Input placeholder="Sofia" />
-                </Form.Item>
                 <Form.Item name="systemPrompt" label="Instruções do agente" rules={[{ required: true }]}
-                  extra="Descreva a personalidade, o que ele deve fazer e quando usar cada ação.">
+                  extra="Descreva quem é o agente (inclusive o nome com que ele se apresenta), a personalidade, o que ele deve fazer e quando usar cada ação.">
                   <TextArea rows={8} placeholder="Você é a Sofia, atendente da empresa. Seja simpática e objetiva. Se o cliente pedir o endereço, envie a localização…" onChange={e => setPrompt(e.target.value)} />
                 </Form.Item>
                 <PromptToolMask prompt={prompt} toolNames={toolNames} />

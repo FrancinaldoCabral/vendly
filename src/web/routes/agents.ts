@@ -104,7 +104,7 @@ agentsRouter.post('/', async (req, res) => {
       res.status(400).json({ error: 'tenantId required for admin' }); return;
     }
     const { name, systemPrompt, model, tools, phone, connectionId,
-      builtinTools, assets, assistantName, customApis, groupConfig, contactFilter } = req.body as Record<string, unknown>;
+      builtinTools, assets, customApis, groupConfig, contactFilter } = req.body as Record<string, unknown>;
     if (!name || !systemPrompt) {
       res.status(400).json({ error: 'name e systemPrompt são obrigatórios' }); return;
     }
@@ -116,7 +116,6 @@ agentsRouter.post('/', async (req, res) => {
       tools: Array.isArray(tools) ? (tools as string[]) : undefined,
       builtinTools: Array.isArray(builtinTools) ? (builtinTools as string[]) : undefined,
       assets: assets as ProvisionAgentInput['assets'],
-      assistantName: assistantName ? String(assistantName) : undefined,
       customApis: Array.isArray(customApis) ? (customApis as unknown[]) : undefined,
       groupConfig: groupConfig as { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean } | undefined,
       contactFilter: contactFilter ? sanitizeFilter(contactFilter as Partial<ContactFilter>) : undefined,
@@ -136,7 +135,7 @@ agentsRouter.put('/:agentId', async (req, res) => {
     const filter: Record<string, unknown> = { _id: req.params.agentId };
     if (tenantId !== '__admin__') filter.tenantId = tenantId;
 
-    const allowed = ['name', 'assistantName', 'systemPrompt', 'model', 'temperature', 'maxIter', 'tools',
+    const allowed = ['name', 'systemPrompt', 'model', 'temperature', 'maxIter', 'tools',
       'builtinTools', 'assets', 'customApis', 'groupConfig', 'contactFilter', 'priority',
       'escalationTeamId', 'escalationAgentId', 'status'];
     const update: Record<string, unknown> = { updatedAt: new Date() };
