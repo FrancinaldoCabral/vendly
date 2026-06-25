@@ -9,12 +9,12 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
+import { brand, gradientText } from '../lib/theme';
 
 const { Header, Sider, Content } = AntLayout;
 const { Text } = Typography;
 
-const BRAND_BG = '#031a18';
-const BRAND_PRIMARY = '#0d9488';
+const BRAND_BG = brand.bgDark;
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const nav = useNavigate();
@@ -90,9 +90,14 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           overflow: 'hidden',
           cursor: 'pointer',
         }} onClick={() => nav('/')}>
-          <CommentOutlined style={{ fontSize: 22, color: BRAND_PRIMARY, flexShrink: 0 }} />
+          <div style={{
+            width: 32, height: 32, borderRadius: 9, background: brand.gradient,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+          }}>
+            <CommentOutlined style={{ fontSize: 18, color: '#fff' }} />
+          </div>
           {!collapsed && (
-            <span style={{ color: '#fff', fontSize: 18, fontWeight: 800, letterSpacing: 0.5, lineHeight: 1 }}>
+            <span style={{ ...gradientText, fontFamily: brand.fontHeading, fontSize: 20, fontWeight: 800, letterSpacing: 0.3, lineHeight: 1 }}>
               vendly
             </span>
           )}
@@ -129,7 +134,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               onMouseEnter={e => (e.currentTarget.style.background = '#f5f5f5')}
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
             >
-              <Avatar size={28} style={{ background: BRAND_PRIMARY }} icon={<UserOutlined />} />
+              <Avatar size={28} style={{ background: brand.gradient }} icon={<UserOutlined />} />
               <Text style={{ fontSize: 13 }}>{me?.email ?? '…'}</Text>
             </div>
           </Dropdown>

@@ -4,11 +4,11 @@ import { Card, Typography, Spin, Result, Alert, Form, Input, Button } from 'antd
 import { CommentOutlined } from '@ant-design/icons';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
+import { brand, gradientText } from '../lib/theme';
 
 const { Title, Text } = Typography;
 
-const BRAND_PRIMARY = '#0d9488';
-const BRAND_BG = '#031a18';
+const BRAND_PRIMARY = brand.primary;
 
 export default function Login() {
   const [params] = useSearchParams();
@@ -101,7 +101,7 @@ export default function Login() {
           block
           size="large"
           loading={submitting}
-          style={{ background: BRAND_PRIMARY, borderColor: BRAND_PRIMARY }}
+          style={{ background: brand.gradient, borderColor: 'transparent', fontWeight: 700 }}
         >
           Entrar
         </Button>
@@ -123,21 +123,22 @@ function LoginShell({ children }: { children: React.ReactNode }) {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      background: `linear-gradient(135deg, ${BRAND_BG} 0%, #051e1c 100%)`,
+      background: `radial-gradient(circle at 50% 0%, rgba(124,58,237,0.18) 0%, transparent 55%), ${brand.bgDark}`,
+      fontFamily: brand.fontBody,
     }}>
       <Card
-        style={{ width: 420, borderRadius: 16, border: 'none', boxShadow: '0 8px 40px #00000040' }}
+        style={{ width: 420, borderRadius: 20, border: `1px solid ${brand.border}`, boxShadow: '0 20px 60px #00000060' }}
         styles={{ body: { padding: 48 } }}
       >
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <div style={{
-            width: 64, height: 64, borderRadius: 16, background: BRAND_PRIMARY,
+            width: 64, height: 64, borderRadius: 18, background: brand.gradient,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            margin: '0 auto 16px',
+            margin: '0 auto 16px', boxShadow: '0 12px 28px rgba(124,58,237,0.4)',
           }}>
             <CommentOutlined style={{ fontSize: 34, color: '#fff' }} />
           </div>
-          <Title level={2} style={{ margin: 0, fontWeight: 800, color: '#111' }}>vendly</Title>
+          <Title level={2} style={{ ...gradientText, margin: 0, fontWeight: 800, fontFamily: brand.fontHeading }}>vendly</Title>
           <Text type="secondary" style={{ fontSize: 14 }}>Plataforma de agentes WhatsApp</Text>
         </div>
         {children}
