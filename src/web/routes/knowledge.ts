@@ -11,8 +11,6 @@
  */
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import { PDFParse } from 'pdf-parse';
-import mammoth from 'mammoth';
 import { config } from '../../config.js';
 import { getDb } from '../../tools/mongodb.js';
 
@@ -196,22 +194,30 @@ function looksBinary(s: string): boolean {
   return bad / sample.length > 0.1;
 }
 
-/** Use the multimodal model to read an image (text + relevant content). No OCR dependency. */
-async function extractImageText(buffer: Buffer, mime: string): Promise<string> {
-  const dataUrl = `data:${mime || 'image/png'};base64,${buffer.toString('base64')}`;
+const EXTRACT_PROMPT = 'Extraia TODO o texto presente neste arquivo e descreva de forma objetiva o conteúdo relevante para uma base de conhecimento de atendimento (tabelas, valores, instruções, etc.). Preserve a ordem. Responda em português, apenas com o conteúdo, sem comentários seus.';
+
+/**
+ * Read an image or PDF via the multimodal model (no OCR, no pdfjs/DOM dependency).
+ * Images go as image_url; PDFs go as a `file` part with OpenRouter's free `pdf-text` parser plugin.
+ */
+async function extractViaModel(buffer: Buffer, mime: string, fileName: string, kind: 'image' | 'pdf'): Promise<string> {
+  const dataUrl = `data:${mime || (kind === 'pdf' ? 'application/pdf' : 'image/png')};base64,${buffer.toString('base64')}`;
+  const body: Record<string, unknown> = {
+    model: config.openrouter.multimodalModel,
+    messages: [{
+      role: 'user',
+      content: kind === 'pdf'
+        ? [{ type: 'text', text: EXTRACT_PROMPT }, { type: 'file', file: { filename: fileName, file_data: dataUrl } }]
+        : [{ type: 'text', text: EXTRACT_PROMPT }, { type: 'image_url', image_url: { url: dataUrl } }],
+    }],
+  };
+  // For PDFs, ask OpenRouter to extract the text server-side (free engine) before the model reads it.
+  if (kind === 'pdf') body.plugins = [{ id: 'file-parser', pdf: { engine: 'pdf-text' } }];
+
   const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.openrouter.apiKey}` },
-    body: JSON.stringify({
-      model: config.openrouter.multimodalModel,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: 'Extraia TODO o texto presente nesta imagem e descreva de forma objetiva o conteúdo relevante para uma base de conhecimento de atendimento (tabelas, valores, instruções, etc.). Responda em português, apenas com o conteúdo, sem comentários seus.' },
-          { type: 'image_url', image_url: { url: dataUrl } },
-        ],
-      }],
-    }),
+    body: JSON.stringify(body),
   });
   const d = await r.json() as { choices?: Array<{ message?: { content?: string } }> };
   return (d.choices?.[0]?.message?.content ?? '').trim();
@@ -222,18 +228,18 @@ async function extractFromFile(buffer: Buffer, fileName: string, mime: string): 
   const ext = (fileName.split('.').pop() ?? '').toLowerCase();
 
   if (ext === 'pdf' || mime === 'application/pdf') {
-    const parser = new PDFParse({ data: buffer });
-    const result = await parser.getText();
-    const t = (result.text ?? '').trim();
-    if (!t) throw new Error('Este PDF não tem texto selecionável (parece ser digitalizado). Envie como imagem para a IA ler, ou cole o texto.');
+    const t = await extractViaModel(buffer, mime || 'application/pdf', fileName, 'pdf');
+    if (!t) throw new Error('Não foi possível ler este PDF. Tente novamente ou cole o texto.');
     return t;
   }
   if (ext === 'docx' || mime.includes('officedocument.wordprocessingml')) {
+    // Loaded on demand so this dependency never runs at app startup.
+    const mammoth = (await import('mammoth')).default;
     const result = await mammoth.extractRawText({ buffer });
     return (result.value ?? '').trim();
   }
   if (IMAGE_EXTS.includes(ext) || mime.startsWith('image/')) {
-    return extractImageText(buffer, mime || `image/${ext}`);
+    return extractViaModel(buffer, mime || `image/${ext}`, fileName, 'image');
   }
   if (ext === 'html' || ext === 'htm' || mime.includes('html')) {
     return htmlToText(buffer.toString('utf8'));
