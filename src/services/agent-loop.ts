@@ -147,9 +147,9 @@ const BUSCAR_MEMORIA_TOOL = {
   function: {
     name: 'buscar_memoria',
     description:
-      'Busca informações na base de conhecimento do negócio (produtos, funcionalidades, recursos, preços, prazos, políticas, procedimentos). ' +
-      'OBRIGATÓRIO: chame esta ferramenta ANTES de responder qualquer pergunta sobre o que o produto/sistema faz, como fazer algo, valores ou regras — mesmo que ache que já sabe. ' +
-      'NUNCA diga que uma funcionalidade não existe sem antes buscar aqui.',
+      'Busca informações do negócio na base de conhecimento: o que é oferecido (produtos, serviços, opções), preços, prazos, horários, condições, regras e como as coisas funcionam. ' +
+      'Use quando o cliente perguntar algo sobre o negócio e, OBRIGATORIAMENTE, antes de dizer que algo não é oferecido, não está disponível ou não existe — nunca invente uma negativa sem checar aqui. ' +
+      'Não precisa usar em cumprimentos ou conversa fiada.',
     parameters: {
       type: 'object',
       required: ['query'],

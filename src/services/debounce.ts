@@ -55,7 +55,7 @@ TRANSFERÊNCIA PARA ATENDIMENTO HUMANO (mecanismo da plataforma):
 - Antes da marca, avise o cliente com UMA frase curta e gentil de que vai chamar um atendente.
 - Use com MODERAÇÃO. Só transfira quando: (a) o cliente pedir claramente para falar com uma
   pessoa, OU (b) for um assunto que você realmente não pode resolver (ex.: pagamento, reembolso,
-  cobrança, acesso à conta travado) ou algo claramente fora do seu escopo.
+  cobrança, reclamação séria) ou algo claramente fora do seu alcance.
 - NUNCA transfira por estar apenas em dúvida — primeiro tente ajudar, pergunte e esclareça.
 - NUNCA transfira repetidamente nem em toda mensagem: uma transferência por assunto basta.`;
 
@@ -100,18 +100,18 @@ REGRA CRÍTICA — NUNCA FINJA UMA AÇÃO:
   return CAPABILITIES_MEDIA + actionsBlock + KNOWLEDGE_SUFFIX + antiHallucination + escalationBlock;
 }
 
-// Always injected. The model has the `buscar_memoria` tool (semantic search over the business
-// knowledge base), but tends to answer from assumption and may wrongly deny a real feature. This
-// forces it to consult the base before answering "what/how/price/rules" questions and, above all,
-// never to deny a capability without having searched first.
+// Always injected. The model has the `buscar_memoria` tool (semantic search over the business's
+// knowledge base). It tends to answer from assumption and may wrongly deny something the business
+// actually offers. Kept business-agnostic (works for a bakery, clinic, shop, software, anything):
+// search when the customer asks about the business — and ALWAYS before saying "no" — but not on
+// every message.
 const KNOWLEDGE_SUFFIX = `
 
-USO DA BASE DE CONHECIMENTO (regra obrigatória):
-- Você tem a ferramenta buscar_memoria, que consulta a base de conhecimento do negócio (produtos, funcionalidades, recursos, preços, prazos, políticas e procedimentos).
-- SEMPRE chame buscar_memoria antes de responder perguntas sobre o que o produto/sistema faz, como fazer algo, valores, prazos ou regras — mesmo que ache que já sabe a resposta.
-- NUNCA afirme que algo "não existe", "não é possível", "não faz parte" ou "não é nativo" sem ter buscado antes na base. A maioria dessas perguntas tem resposta na base.
-- Se, após buscar, você não encontrar a informação, NÃO negue categoricamente: diga que vai confirmar, peça mais detalhes ou encaminhe — nunca invente uma negativa que pode fazer o cliente desistir.
-- Na dúvida sobre uma funcionalidade, prefira buscar e, se ainda assim incerto, ser cauteloso e prestativo em vez de dizer que não dá.`;
+CONHECIMENTO DO NEGÓCIO (regra importante):
+- Você tem a ferramenta buscar_memoria, que consulta as informações do negócio: o que é oferecido (produtos, serviços, opções), preços, prazos, horários, formas de pagamento, condições, regras e como as coisas funcionam.
+- Quando o cliente perguntar algo sobre o negócio (o que vocês oferecem, valores, disponibilidade, prazos, condições, "vocês têm/fazem isso?", "como funciona?"), CONSULTE buscar_memoria antes de responder — não responda de memória. Não precisa buscar para cumprimentos, conversa fiada ou confirmações simples.
+- NUNCA diga ao cliente que algo não é oferecido, não está disponível, não existe ou que "não trabalhamos com isso" sem ANTES ter consultado a base. Negar por engano faz o cliente ir embora.
+- Se, depois de buscar, você não encontrar a informação, NÃO negue: diga que vai confirmar/verificar, peça mais detalhes ou encaminhe. Na dúvida, seja prestativo em vez de dizer que não.`;
 
 // ── In-process keyed mutex ───────────────────────────────────────────────────
 // Serializes async work sharing a key within this Node process. Used to stop
