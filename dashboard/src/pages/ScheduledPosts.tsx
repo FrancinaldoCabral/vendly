@@ -255,7 +255,7 @@ export default function ScheduledPosts() {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, gap: 8, flexWrap: 'wrap' }}>
         <Title level={3} style={{ margin: 0 }}><CalendarOutlined /> Postagens agendadas</Title>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={agents.length === 0}>
           Nova postagem

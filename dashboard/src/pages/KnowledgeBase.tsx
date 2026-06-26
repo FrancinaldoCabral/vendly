@@ -147,7 +147,7 @@ export default function KnowledgeBase() {
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, gap: 8, flexWrap: 'wrap' }}>
         <Title level={3} style={{ margin: 0 }}><BookOutlined /> Base de Conhecimento</Title>
         <Space wrap>
           <Button icon={<GlobalOutlined />} onClick={() => { urlForm.resetFields(); setUrlOpen(true); }} disabled={!agentId}>
@@ -197,6 +197,8 @@ export default function KnowledgeBase() {
           columns={cols}
           loading={isLoading}
           pagination={{ pageSize: 20 }}
+          scroll={{ x: 'max-content' }}
+          size="middle"
           locale={{ emptyText: 'Nenhum item na base de conhecimento deste agente.' }}
         />
       )}

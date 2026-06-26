@@ -125,10 +125,11 @@ function LoginShell({ children }: { children: React.ReactNode }) {
       justifyContent: 'center',
       background: `radial-gradient(circle at 50% 0%, rgba(124,58,237,0.18) 0%, transparent 55%), ${brand.bgDark}`,
       fontFamily: brand.fontBody,
+      padding: 16,
     }}>
       <Card
-        style={{ width: 420, borderRadius: 20, border: `1px solid ${brand.border}`, boxShadow: '0 20px 60px #00000060' }}
-        styles={{ body: { padding: 48 } }}
+        style={{ width: '100%', maxWidth: 420, borderRadius: 20, border: `1px solid ${brand.border}`, boxShadow: '0 20px 60px #00000060' }}
+        styles={{ body: { padding: 'clamp(24px, 6vw, 48px)' } }}
       >
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <div style={{

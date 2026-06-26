@@ -161,7 +161,7 @@ export default function Connections() {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
         <Title level={3} style={{ margin: 0 }}><WhatsAppOutlined /> Meus WhatsApps</Title>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setCreateOpen(true); }}>
           Conectar um WhatsApp
