@@ -83,6 +83,8 @@ export interface Agent {
   builtinTools?: string[];
   assets?: AgentAssets;
   customApis: CustomApi[];
+  respondToDirect?: boolean;
+  respondToGroups?: boolean;
   groupConfig?: GroupConfig;
   contactFilter?: ContactFilter;
   priority?: number;

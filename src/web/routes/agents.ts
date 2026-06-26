@@ -104,7 +104,8 @@ agentsRouter.post('/', async (req, res) => {
       res.status(400).json({ error: 'tenantId required for admin' }); return;
     }
     const { name, systemPrompt, model, tools, phone, connectionId,
-      builtinTools, assets, customApis, groupConfig, contactFilter } = req.body as Record<string, unknown>;
+      builtinTools, assets, customApis, groupConfig, contactFilter,
+      respondToDirect, respondToGroups } = req.body as Record<string, unknown>;
     if (!name || !systemPrompt) {
       res.status(400).json({ error: 'name e systemPrompt são obrigatórios' }); return;
     }
@@ -117,6 +118,8 @@ agentsRouter.post('/', async (req, res) => {
       builtinTools: Array.isArray(builtinTools) ? (builtinTools as string[]) : undefined,
       assets: assets as ProvisionAgentInput['assets'],
       customApis: Array.isArray(customApis) ? (customApis as unknown[]) : undefined,
+      respondToDirect: typeof respondToDirect === 'boolean' ? respondToDirect : undefined,
+      respondToGroups: typeof respondToGroups === 'boolean' ? respondToGroups : undefined,
       groupConfig: groupConfig as { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean } | undefined,
       contactFilter: contactFilter ? sanitizeFilter(contactFilter as Partial<ContactFilter>) : undefined,
       phone: phone ? String(phone) : undefined,
@@ -137,7 +140,7 @@ agentsRouter.put('/:agentId', async (req, res) => {
 
     const allowed = ['name', 'systemPrompt', 'model', 'temperature', 'maxIter', 'tools',
       'builtinTools', 'assets', 'customApis', 'groupConfig', 'contactFilter', 'priority',
-      'escalationTeamId', 'escalationAgentId', 'status'];
+      'respondToDirect', 'respondToGroups', 'escalationTeamId', 'escalationAgentId', 'status'];
     const update: Record<string, unknown> = { updatedAt: new Date() };
     for (const k of allowed) {
       if (req.body[k] !== undefined) update[k] = req.body[k];

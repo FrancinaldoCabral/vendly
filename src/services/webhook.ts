@@ -40,6 +40,8 @@ interface RoutableAgent {
   priority?: number;
   contactFilter?: Partial<ContactFilter>;
   groupConfig?: GroupConfig;
+  respondToDirect?: boolean; // answer private 1:1 chats (default true)
+  respondToGroups?: boolean; // answer in groups at all (default false)
 }
 
 /** Pull the reply/quote context out of a message. WhatsApp uses two shapes:
@@ -102,11 +104,18 @@ function cheapText(message: Record<string, unknown>): string {
   return String(message.conversation ?? ext ?? imgCap ?? vidCap ?? docCap ?? '');
 }
 
-/** Does this agent's filter let a message from `senderPhone` in chat `jid` through? */
+/** Does this agent attend this chat? Gates by SCOPE (private vs group) first, then by contactFilter.
+ *  Scope lets two agents on the SAME number split by "where" they work: one private, one in groups.
+ *  Defaults: answers private chats (true), does NOT answer groups (false). */
 function agentClaims(agent: RoutableAgent, jid: string, senderPhone: string): boolean {
+  const isGroup = jid.endsWith('@g.us');
+  const answersDirect = agent.respondToDirect ?? true;
+  const answersGroups = agent.respondToGroups ?? false;
+  if (isGroup && !answersGroups) return false;
+  if (!isGroup && !answersDirect) return false;
+
   const f = agent.contactFilter ?? {};
   const mode = f.mode === 'whitelist' ? 'whitelist' : 'blacklist';
-  const isGroup = jid.endsWith('@g.us');
   const phone = senderPhone.replace(/\D/g, '');
   const listed = isGroup ? (f.groups ?? []).includes(jid) : (f.contacts ?? []).includes(phone);
   return mode === 'whitelist' ? listed : !listed;
@@ -312,7 +321,7 @@ async function resolveChatwootAgents(subjectId: string): Promise<Array<RoutableA
   if (conn) {
     const agents = (await db.collection('agents').find(
       { connectionId: subjectId } as Record<string, unknown>,
-      { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, chatwootInboxId: 1, status: 1 } },
+      { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, respondToDirect: 1, respondToGroups: 1, chatwootInboxId: 1, status: 1 } },
     ).toArray()) as unknown as Array<RoutableAgent & { chatwootInboxId?: number; status?: string }>;
     return agents
       .filter(a => a.status !== 'paused')
@@ -321,7 +330,7 @@ async function resolveChatwootAgents(subjectId: string): Promise<Array<RoutableA
   // Legacy: subject is an agent id
   const agent = (await db.collection('agents').findOne(
     { _id: subjectId } as Record<string, unknown>,
-    { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, chatwootInboxId: 1, status: 1 } },
+    { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, respondToDirect: 1, respondToGroups: 1, chatwootInboxId: 1, status: 1 } },
   )) as unknown as (RoutableAgent & { chatwootInboxId?: number; status?: string }) | null;
   return agent ? [agent] : [];
 }
@@ -431,7 +440,7 @@ export async function handleEvolutionMessageWebhook(
   // Load ALL agents listening on this connection, in priority order (then age).
   const agents = (await db.collection('agents').find(
     { evolutionInstance: instance } as Record<string, unknown>,
-    { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, groupConfig: 1, status: 1, chatwootInboxId: 1 } },
+    { projection: { _id: 1, tenantId: 1, priority: 1, contactFilter: 1, groupConfig: 1, respondToDirect: 1, respondToGroups: 1, status: 1, chatwootInboxId: 1 } },
   ).toArray()) as unknown as Array<RoutableAgent & { status?: string; chatwootInboxId?: number }>;
   // Only active/pending agents participate; sort by priority asc, stable by id.
   const ordered = agents

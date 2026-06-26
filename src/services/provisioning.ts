@@ -43,6 +43,8 @@ export interface ProvisionAgentInput {
   builtinTools?: string[];
   assets?: AgentDoc['assets'];
   customApis?: unknown[];
+  respondToDirect?: boolean;
+  respondToGroups?: boolean;
   groupConfig?: { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean };
   contactFilter?: { mode: 'blacklist' | 'whitelist'; contacts: string[]; groups: string[] };
   /** Attach to an existing WhatsApp connection. If omitted, a new one is created (1:1 legacy). */
@@ -89,6 +91,8 @@ export interface AgentDoc {
     recipients?: Array<{ label: string; destination: string; isGroup?: boolean }>;
   };
   customApis: unknown[];
+  respondToDirect?: boolean;       // answer private 1:1 chats (default true)
+  respondToGroups?: boolean;       // answer in groups at all (default false)
   groupConfig: { respondToMentions: boolean; respondToReplies: boolean; respondToAll: boolean };
   contactFilter: { mode: 'blacklist' | 'whitelist'; contacts: string[]; groups: string[] };
   priority: number;               // lower = checked first when a connection is shared
@@ -464,6 +468,8 @@ export async function provisionAgent(input: ProvisionAgentInput): Promise<AgentD
     builtinTools: input.builtinTools ?? [],
     assets: input.assets ?? {},
     customApis: input.customApis ?? [],
+    respondToDirect: input.respondToDirect ?? true,
+    respondToGroups: input.respondToGroups ?? false,
     groupConfig: input.groupConfig ?? { respondToMentions: true, respondToReplies: true, respondToAll: false },
     contactFilter: input.contactFilter ?? { mode: 'blacklist', contacts: [], groups: [] }, // default: empty blacklist → everyone passes
     priority: siblings, // appended after existing agents

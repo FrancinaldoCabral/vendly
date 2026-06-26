@@ -606,6 +606,8 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
     if (agent) {
       form.setFieldsValue({
         name: agent.name,
+        respondToDirect: agent.respondToDirect ?? true,
+        respondToGroups: agent.respondToGroups ?? false,
         respondToMentions: agent.groupConfig?.respondToMentions ?? true,
         respondToReplies: agent.groupConfig?.respondToReplies ?? true,
         respondToAll: agent.groupConfig?.respondToAll ?? false,
@@ -623,7 +625,7 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
       }).catch(() => { /* ignore */ });
     } else {
       form.resetFields();
-      form.setFieldsValue({ respondToMentions: true, respondToReplies: true, respondToAll: false });
+      form.setFieldsValue({ respondToDirect: true, respondToGroups: false, respondToMentions: true, respondToReplies: true, respondToAll: false });
       setCustomApis([]); setBuiltinTools([]); setAssets({}); setFilter(EMPTY_FILTER); setPrompt('');
     }
   }, [open, agent, form]);
@@ -638,6 +640,8 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
       customApis,
       contactFilter: filter,
       connectionId,
+      respondToDirect: vals.respondToDirect as boolean,
+      respondToGroups: vals.respondToGroups as boolean,
       groupConfig: {
         respondToMentions: vals.respondToMentions as boolean,
         respondToReplies: vals.respondToReplies as boolean,
@@ -663,6 +667,10 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
   });
 
   const submit = () => form.validateFields().then(vals => {
+    if (!vals.respondToDirect && !vals.respondToGroups) {
+      message.warning('Escolha onde o agente atende: conversas privadas, grupos, ou os dois.');
+      return;
+    }
     if (isEdit) update.mutate(vals as Record<string, unknown>);
     else create.mutate(vals as Record<string, unknown>);
   });
@@ -706,6 +714,39 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
                   <TextArea rows={8} placeholder="Você é a Sofia, atendente da empresa. Seja simpática e objetiva. Se o cliente pedir o endereço, envie a localização…" onChange={e => setPrompt(e.target.value)} />
                 </Form.Item>
                 <PromptToolMask prompt={prompt} toolNames={toolNames} />
+
+                <div style={{ margin: '20px 0 8px' }}>
+                  <Text strong><TeamOutlined /> Onde o agente atende</Text>
+                  <Paragraph type="secondary" style={{ fontSize: 12, margin: '4px 0 0' }}>
+                    Você pode ter, no mesmo número, um agente só para o privado e outro só para um grupo
+                    (cada um com seu contexto) — ou um único agente atendendo os dois.
+                  </Paragraph>
+                </div>
+                <Form.Item name="respondToDirect" label="Conversas privadas (mensagens diretas)" valuePropName="checked"
+                  extra="Atende quem chama no privado, individualmente." style={{ marginBottom: 12 }}>
+                  <Switch />
+                </Form.Item>
+                <Form.Item name="respondToGroups" label="Grupos" valuePropName="checked"
+                  extra="Atende em grupos de WhatsApp." style={{ marginBottom: 8 }}>
+                  <Switch />
+                </Form.Item>
+                <Form.Item noStyle shouldUpdate={(p, c) => p.respondToGroups !== c.respondToGroups}>
+                  {({ getFieldValue }) => getFieldValue('respondToGroups') ? (
+                    <div style={{ marginLeft: 4, paddingLeft: 14, borderLeft: '2px solid #f0f0f0' }}>
+                      <Alert type="info" showIcon style={{ marginBottom: 12 }}
+                        message="Em grupos, o agente só responde quando uma destas condições acontece." />
+                      <Form.Item name="respondToMentions" label="Quando é mencionado (@)" valuePropName="checked" style={{ marginBottom: 10 }}>
+                        <Switch />
+                      </Form.Item>
+                      <Form.Item name="respondToReplies" label="Quando respondem a uma mensagem dele" valuePropName="checked" style={{ marginBottom: 10 }}>
+                        <Switch />
+                      </Form.Item>
+                      <Form.Item name="respondToAll" label="A todas as mensagens do grupo" valuePropName="checked" style={{ marginBottom: 0 }}>
+                        <Switch />
+                      </Form.Item>
+                    </div>
+                  ) : null}
+                </Form.Item>
               </>
             ),
           },
@@ -747,24 +788,6 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
                   extra="Cole o ID do grupo (termina com @g.us) e tecle Enter.">
                   <Select mode="tags" value={filter.groups} onChange={groups => setFilter({ ...filter, groups })}
                     placeholder="1203...@g.us" tokenSeparators={[',', ' ']} open={false} />
-                </Form.Item>
-              </>
-            ),
-          },
-          {
-            key: 'groups',
-            label: <span><TeamOutlined /> Grupos</span>,
-            children: (
-              <>
-                <Alert type="info" showIcon message="Em grupos, o agente só responde se uma destas condições for atendida." style={{ marginBottom: 16 }} />
-                <Form.Item name="respondToMentions" label="Responder quando mencionado (@)" valuePropName="checked">
-                  <Switch />
-                </Form.Item>
-                <Form.Item name="respondToReplies" label="Responder quando respondem a uma mensagem dele" valuePropName="checked">
-                  <Switch />
-                </Form.Item>
-                <Form.Item name="respondToAll" label="Responder a todas as mensagens do grupo" valuePropName="checked">
-                  <Switch />
                 </Form.Item>
               </>
             ),

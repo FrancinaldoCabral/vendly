@@ -233,6 +233,8 @@ export default function Connections() {
                           <Text strong>{a.name}</Text>
                           <div style={{ marginTop: 2, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                             <Badge status={ab.color} text={ab.label} />
+                            {(a.respondToDirect ?? true) && <Tag color="green" style={{ fontSize: 11 }}>Privado</Tag>}
+                            {(a.respondToGroups ?? false) && <Tag color="purple" style={{ fontSize: 11 }}>Grupos</Tag>}
                             {a.contactFilter?.mode === 'whitelist'
                               ? <Tag color="blue" style={{ fontSize: 11 }}>Atende lista específica</Tag>
                               : (a.contactFilter?.contacts?.length || a.contactFilter?.groups?.length)
