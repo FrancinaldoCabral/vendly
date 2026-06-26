@@ -10,6 +10,7 @@ import { agentLoop, type AgentLoopContext, type OpenRouterMessage } from './agen
 import { type GroupConfig } from './group-filter.js';
 import { generateTts, buildMediaContentPart, type MediaKind } from './media.js';
 import { CATALOG_BY_ID, type AssetKind } from './tool-catalog.js';
+import { toWhatsApp, stripFormatting } from './markdown.js';
 
 const DEBOUNCE_MS = 12_000; // 12 s — allows for back-to-back typing before processing
 const MAX_STORED_MESSAGES = 500; // hard safety cap on stored turns (summary keeps meaning)
@@ -433,7 +434,7 @@ export async function processBuffer(agentId: string, conversationId: string, ten
   let audioSourceId: string | null = null;
   let audioMirror: { base64: string; mimetype: string } | null = null;
   if (replyInAudio && cleanContent) {
-    const tts = await generateTts(cleanContent);
+    const tts = await generateTts(stripFormatting(cleanContent));
     if (tts) {
       audioSourceId = await sendEvolutionAudio(instance, contactJid, tts.base64);
       audioMirror = { base64: tts.base64, mimetype: tts.mimetype };
@@ -627,7 +628,9 @@ export async function handleToolResult(token: string, resultText: string): Promi
  * Max 280 chars per chunk (like a natural WhatsApp message).
  */
 function chunkMessage(text: string, maxLen = 280): string[] {
-  const clean = text.replace(/\[ESCALAR_HUMANO\]/g, '').trim();
+  // Strip the internal escalation flag, then convert Markdown → WhatsApp formatting so the
+  // customer never sees broken markup (**negrito**, ## Título, [texto](url)).
+  const clean = toWhatsApp(text.replace(/\[ESCALAR_HUMANO\]/g, '')).trim();
   if (!clean) return [];
 
   // Every line break (single OR double) is a message boundary — this is what makes
