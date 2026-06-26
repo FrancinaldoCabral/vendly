@@ -97,8 +97,20 @@ REGRA CRÍTICA — NUNCA FINJA UMA AÇÃO:
   // an escalation would just silence the bot for 24h with nobody to pick it up.
   const escalationBlock = (agent.escalationTeamId || agent.escalationAgentId) ? ESCALATION_SUFFIX : '';
 
-  return CAPABILITIES_MEDIA + actionsBlock + KNOWLEDGE_SUFFIX + antiHallucination + escalationBlock;
+  return CAPABILITIES_MEDIA + actionsBlock + KNOWLEDGE_SUFFIX + REALTIME_SUFFIX + antiHallucination + escalationBlock;
 }
+
+// Always injected. The platform is synchronous: one customer message → one debounced reply. There
+// is no "later" — the bot cannot resume on its own. Yet the model loves to end a turn with "I'll
+// get back to you / one moment / I'm checking", which leaves the customer waiting forever. This
+// forbids that and forces it to do everything within the current reply.
+const REALTIME_SUFFIX = `
+
+VOCÊ RESPONDE EM TEMPO REAL — NUNCA PROMETA RETORNO DEPOIS:
+- Cada resposta sua é a ÚNICA que o cliente recebe até ele escrever de novo. Você NÃO trabalha em segundo plano e NÃO consegue "voltar depois" por conta própria.
+- É PROIBIDO encerrar a mensagem prometendo algo para o futuro, como "já te retorno", "já te aviso", "estou verificando, aguarde", "deixa eu analisar e te respondo" ou "só um instante". Isso deixa o cliente esperando para sempre.
+- Resolva AGORA, nesta mesma resposta: se existe uma ferramenta para o que foi pedido, use-a já e responda com o resultado; se o cliente mandou uma imagem/áudio/arquivo, leia e responda agora; se faltar alguma informação, pergunte na hora; se não for algo que você resolve, diga isso com clareza.
+- Exceção única: se uma ferramenta avisar EXPLICITAMENTE que está processando em segundo plano, aí sim você pode dizer que está em andamento.`;
 
 // Always injected. The model has the `buscar_memoria` tool (semantic search over the business's
 // knowledge base). It tends to answer from assumption and may wrongly deny something the business
@@ -111,7 +123,7 @@ CONHECIMENTO DO NEGÓCIO (regra importante):
 - Você tem a ferramenta buscar_memoria, que consulta as informações do negócio: o que é oferecido (produtos, serviços, opções), preços, prazos, horários, formas de pagamento, condições, regras e como as coisas funcionam.
 - Quando o cliente perguntar algo sobre o negócio (o que vocês oferecem, valores, disponibilidade, prazos, condições, "vocês têm/fazem isso?", "como funciona?"), CONSULTE buscar_memoria antes de responder — não responda de memória. Não precisa buscar para cumprimentos, conversa fiada ou confirmações simples.
 - NUNCA diga ao cliente que algo não é oferecido, não está disponível, não existe ou que "não trabalhamos com isso" sem ANTES ter consultado a base. Negar por engano faz o cliente ir embora.
-- Se, depois de buscar, você não encontrar a informação, NÃO negue: diga que vai confirmar/verificar, peça mais detalhes ou encaminhe. Na dúvida, seja prestativo em vez de dizer que não.`;
+- Se, depois de buscar, você não encontrar a informação, NÃO negue de imediato: peça mais detalhes ao cliente ou encaminhe para um humano. Na dúvida, seja prestativo em vez de dizer que não — mas sem prometer retorno futuro.`;
 
 // ── In-process keyed mutex ───────────────────────────────────────────────────
 // Serializes async work sharing a key within this Node process. Used to stop
