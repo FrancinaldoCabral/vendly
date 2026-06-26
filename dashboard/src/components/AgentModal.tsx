@@ -785,9 +785,12 @@ export default function AgentModal({ agent, open, onClose, catalog, connectionId
                     placeholder="5511999998888" tokenSeparators={[',', ' ']} open={false} />
                 </Form.Item>
                 <Form.Item label={filter.mode === 'whitelist' ? 'Grupos permitidos' : 'Grupos bloqueados'}
-                  extra="Cole o ID do grupo (termina com @g.us) e tecle Enter.">
-                  <Select mode="tags" value={filter.groups} onChange={groups => setFilter({ ...filter, groups })}
-                    placeholder="1203...@g.us" tokenSeparators={[',', ' ']} open={false} />
+                  extra="Selecione os grupos pelo nome (apenas grupos em que este WhatsApp participa aparecem aqui).">
+                  <Select mode="multiple" showSearch optionFilterProp="label"
+                    value={filter.groups} onChange={g => setFilter({ ...filter, groups: g })}
+                    placeholder={groups.length ? 'Escolha os grupos' : 'Conecte o WhatsApp para listar os grupos'}
+                    notFoundContent={groups.length ? 'Nenhum grupo' : 'Conecte o WhatsApp para listar os grupos'}
+                    options={groups.map(g => ({ value: g.id, label: g.subject }))} />
                 </Form.Item>
               </>
             ),
