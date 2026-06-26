@@ -194,11 +194,11 @@ export default function Connections() {
               {/* WhatsApp header */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', padding: '16px 20px', borderBottom: '1px solid #f0f0f0', background: '#fafafa', borderRadius: '8px 8px 0 0' }}>
                 <WhatsAppOutlined style={{ fontSize: 22, color: '#25D366' }} />
-                <div style={{ flex: 1, minWidth: 180 }}>
+                <div style={{ flex: '1 1 160px', minWidth: 0 }}>
                   <Text strong style={{ fontSize: 16 }}>{conn.name}</Text>
                   <div style={{ marginTop: 2 }}><Badge status={sb.color} text={sb.label} /></div>
                 </div>
-                <Space wrap>
+                <Space wrap size={8} style={{ marginLeft: 'auto' }}>
                   <Button type={conn.status === 'pending_qr' ? 'primary' : 'default'} icon={<QrcodeOutlined />} onClick={() => setQrConn(conn)}>
                     {conn.status === 'pending_qr' ? 'Conectar' : 'Reconectar / QR'}
                   </Button>
@@ -227,9 +227,9 @@ export default function Connections() {
                   list.map(a => {
                     const ab = agentBadge(a.status);
                     return (
-                      <div key={a._id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid #f5f5f5' }}>
-                        <RobotOutlined style={{ fontSize: 18, color: '#7C3AED' }} />
-                        <div style={{ flex: 1, minWidth: 160 }}>
+                      <div key={a._id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid #f5f5f5', flexWrap: 'wrap' }}>
+                        <RobotOutlined style={{ fontSize: 18, color: '#7C3AED', flexShrink: 0 }} />
+                        <div style={{ flex: '1 1 180px', minWidth: 0 }}>
                           <Text strong>{a.name}</Text>
                           <div style={{ marginTop: 2, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                             <Badge status={ab.color} text={ab.label} />
@@ -242,18 +242,20 @@ export default function Connections() {
                                 : <Tag style={{ fontSize: 11 }}>Atende todos</Tag>}
                           </div>
                         </div>
-                        {a.status === 'paused' ? (
-                          <Button size="small" type="primary" ghost icon={<PlayCircleOutlined />} loading={toggleAgent.isPending}
-                            onClick={() => toggleAgent.mutate({ id: a._id, status: 'active' })}>Retomar</Button>
-                        ) : (
-                          <Button size="small" icon={<PauseCircleOutlined />} loading={toggleAgent.isPending}
-                            disabled={a.status === 'pending_qr'}
-                            onClick={() => toggleAgent.mutate({ id: a._id, status: 'paused' })}>Pausar</Button>
-                        )}
-                        <Button size="small" icon={<EditOutlined />} onClick={() => openEditAgent(conn, a)}>Editar</Button>
-                        <Popconfirm title={`Remover agente "${a.name}"?`} description="Remove o agente e sua base de conhecimento. O WhatsApp continua conectado." onConfirm={() => delAgent.mutate(a._id)} okText="Remover" okButtonProps={{ danger: true }}>
-                          <Button size="small" danger icon={<DeleteOutlined />} />
-                        </Popconfirm>
+                        <Space wrap size={8} style={{ marginLeft: 'auto' }}>
+                          {a.status === 'paused' ? (
+                            <Button size="small" type="primary" ghost icon={<PlayCircleOutlined />} loading={toggleAgent.isPending}
+                              onClick={() => toggleAgent.mutate({ id: a._id, status: 'active' })}>Retomar</Button>
+                          ) : (
+                            <Button size="small" icon={<PauseCircleOutlined />} loading={toggleAgent.isPending}
+                              disabled={a.status === 'pending_qr'}
+                              onClick={() => toggleAgent.mutate({ id: a._id, status: 'paused' })}>Pausar</Button>
+                          )}
+                          <Button size="small" icon={<EditOutlined />} onClick={() => openEditAgent(conn, a)}>Editar</Button>
+                          <Popconfirm title={`Remover agente "${a.name}"?`} description="Remove o agente e sua base de conhecimento. O WhatsApp continua conectado." onConfirm={() => delAgent.mutate(a._id)} okText="Remover" okButtonProps={{ danger: true }}>
+                            <Button size="small" danger icon={<DeleteOutlined />} />
+                          </Popconfirm>
+                        </Space>
                       </div>
                     );
                   })

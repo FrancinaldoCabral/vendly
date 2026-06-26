@@ -151,28 +151,28 @@ export default function Settings() {
         </Paragraph>
 
         <Text strong style={{ fontSize: 13 }}>De um cliente específico</Text>
-        <Space.Compact style={{ display: 'flex', marginTop: 8, marginBottom: 20, maxWidth: 620, flexWrap: 'wrap' }}>
-          <Select placeholder="Escolha o agente" style={{ minWidth: 200 }} options={agentOptions}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, marginBottom: 20, maxWidth: 620 }}>
+          <Select placeholder="Escolha o agente" style={{ flex: '1 1 200px' }} options={agentOptions}
             value={clientAgent} onChange={setClientAgent} />
-          <Input placeholder="Número do cliente (ex.: 5511999998888)" style={{ flex: 1, minWidth: 220 }}
+          <Input placeholder="Número do cliente (ex.: 5511999998888)" style={{ flex: '2 1 200px' }}
             value={clientPhone} onChange={e => setClientPhone(e.target.value)} />
           <Popconfirm title="Apagar o histórico deste cliente com este agente?" okText="Apagar" cancelText="Cancelar"
             onConfirm={() => clearClient.mutate()}>
             <Button danger icon={<ClearOutlined />} loading={clearClient.isPending}
               disabled={!clientAgent || clientPhone.replace(/\D/g, '').length < 8}>Limpar</Button>
           </Popconfirm>
-        </Space.Compact>
+        </div>
 
         <div>
           <Text strong style={{ fontSize: 13 }}>De TODOS os clientes de um agente</Text>
-          <Space style={{ display: 'flex', marginTop: 8, maxWidth: 620 }}>
-            <Select placeholder="Escolha o agente" style={{ minWidth: 200, flex: 1 }} options={agentOptions}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, maxWidth: 620 }}>
+            <Select placeholder="Escolha o agente" style={{ flex: '1 1 200px' }} options={agentOptions}
               value={allAgent} onChange={setAllAgent} />
             <Popconfirm title="Apagar TODO o histórico de conversas deste agente? Não há como desfazer." okText="Apagar tudo" cancelText="Cancelar"
               onConfirm={() => clearAll.mutate()}>
               <Button danger icon={<ClearOutlined />} loading={clearAll.isPending} disabled={!allAgent}>Limpar tudo</Button>
             </Popconfirm>
-          </Space>
+          </div>
         </div>
       </Card>
 
@@ -181,7 +181,7 @@ export default function Settings() {
           Pausa todos os agentes de uma vez — eles param de responder no WhatsApp imediatamente, mas
           o número continua conectado. Use em uma emergência ou fora do horário. Depois é só reativar.
         </Paragraph>
-        <Space>
+        <Space wrap>
           <Popconfirm title="Pausar TODOS os agentes? Eles param de responder até você reativar." okText="Pausar todos" cancelText="Cancelar"
             onConfirm={() => pauseAll.mutate()}>
             <Button danger icon={<PauseCircleOutlined />} loading={pauseAll.isPending}>Pausar todos os agentes</Button>

@@ -292,7 +292,7 @@ export default function ScheduledPosts() {
         {posts.map(p => (
           <Card key={p._id} styles={{ body: { padding: '14px 20px' } }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-              <div style={{ flex: 1 }}>
+              <div style={{ flex: '1 1 220px', minWidth: 0 }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <Badge status={p.status === 'active' ? 'success' : 'default'} text={<Text strong>{formatSchedule(p.schedule)}</Text>} />
                   <Tag color="blue">{agentName(p.agentId)}</Tag>
@@ -307,7 +307,7 @@ export default function ScheduledPosts() {
                   </Text>
                 )}
               </div>
-              <Space wrap>
+              <Space wrap size={8} style={{ marginLeft: 'auto' }}>
                 <Button
                   icon={p.status === 'active' ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
                   onClick={() => toggle.mutate(p._id)}
